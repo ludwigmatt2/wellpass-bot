@@ -47,13 +47,10 @@ def schedule_keyboard(sessions: list, gym_id: str, target_date: date) -> InlineK
 
 def studios_keyboard(studios: list) -> InlineKeyboardMarkup:
     rows = []
-    for studio in studios:
+    for studio in studios[:20]:
+        name = studio["gym_name"][:28]
         rows.append([
-            InlineKeyboardButton(
-                f"🏋️ {studio['gym_name']}",
-                callback_data=f"noop:{studio['gym_id']}",
-            ),
-            InlineKeyboardButton("❌", callback_data=f"studio_rm:{studio['gym_id']}"),
+            InlineKeyboardButton(f"❌ {name}", callback_data=f"studio_rm:{studio['gym_id']}"),
         ])
     rows.append([InlineKeyboardButton("➕ Studio hinzufügen", callback_data="studio_search")])
     return InlineKeyboardMarkup(rows)

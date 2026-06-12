@@ -134,6 +134,7 @@ async def received_password(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         if user_record:
             try:
                 favs = await api.get_user_favourites(token_data.accessToken)
+                favs = favs[:5]
                 for fav in favs:
                     await db.add_user_studio(
                         user_record["id"],
