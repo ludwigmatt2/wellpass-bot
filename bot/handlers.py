@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date
 
 from telegram import Update
 from telegram.constants import ParseMode
@@ -303,28 +303,52 @@ async def schedule_studio_callback(update: Update, context: ContextTypes.DEFAULT
     await _send_schedule(query.message.chat, user, studio, context.bot)
 
 
-async def _send_schedule(chat, user: dict, studio: dict, bot) -> None:
+async def _send_schedule(chat, user: dict, studio: dict, bot, target_date: date | None = None) -> None:
+    if target_date is None:
+        target_date = datetime.now(timezone.utc).date()
     msg = await bot.send_message(chat.id, "⏳ Lade Stundenplan...")
     try:
-        token = await auth.get_valid_token(user, db)
-        now = datetime.now(timezone.utc)
-        to_dt = now + timedelta(days=7)
-        sessions = await api.get_schedule(studio["gym_id"], token, now, to_dt)
-        filters_list = await db.get_class_filters(user["id"], studio["gym_id"])
-        text = format_schedule(sessions, studio["gym_name"], filters_list)
-        keyboard = schedule_keyboard(sessions)
-        if filters_list:
-            filter_names = {f["class_name"].lower() for f in filters_list}
-            filtered = [s for s in sessions if s["name"].lower() in filter_names]
-            keyboard = schedule_keyboard(filtered)
-        await msg.edit_text(
-            text,
-            reply_markup=keyboard,
-            parse_mode=ParseMode.MARKDOWN,
-        )
+        text, keyboard = await _fetch_schedule(user, studio, target_date)
+        await msg.edit_text(text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
         logger.error(f"Schedule fetch error: {e}")
         await msg.edit_text("Fehler beim Laden des Stundenplans. Versuche es erneut.")
+
+
+async def _fetch_schedule(user: dict, studio: dict, target_date: date):
+    token = await auth.get_valid_token(user, db)
+    from_dt = datetime(target_date.year, target_date.month, target_date.day, 0, 0, 0, tzinfo=timezone.utc)
+    to_dt = datetime(target_date.year, target_date.month, target_date.day, 23, 59, 59, tzinfo=timezone.utc)
+    sessions = await api.get_schedule(studio["gym_id"], token, from_dt, to_dt)
+    filters_list = await db.get_class_filters(user["id"], studio["gym_id"])
+    if filters_list:
+        filter_names = {f["class_name"].lower() for f in filters_list}
+        sessions = [s for s in sessions if s["name"].lower() in filter_names]
+    text = format_schedule(sessions, studio["gym_name"], filters_list, target_date)
+    keyboard = schedule_keyboard(sessions, studio["gym_id"], target_date)
+    return text, keyboard
+
+
+async def schedule_nav_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    user = await db.get_user_by_telegram_id(query.from_user.id)
+    if not user:
+        return
+    parts = query.data.split(":")
+    gym_id, date_str = parts[1], parts[2]
+    studios = await db.get_user_studios(user["id"])
+    studio = next((s for s in studios if s["gym_id"] == gym_id), None)
+    if not studio:
+        await query.answer("Studio nicht gefunden.", show_alert=True)
+        return
+    try:
+        target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        text, keyboard = await _fetch_schedule(user, studio, target_date)
+        await query.edit_message_text(text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        logger.error(f"Schedule nav error: {e}")
+        await query.answer("Fehler beim Laden.", show_alert=True)
 
 
 # ── Book & Watch callbacks ─────────────────────────────────────────────────────
@@ -674,6 +698,7 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("stop", stop_command))
     app.add_handler(CommandHandler("help", help_command))
 
+    app.add_handler(CallbackQueryHandler(schedule_nav_callback, pattern="^sched_nav:"))
     app.add_handler(CallbackQueryHandler(book_callback, pattern="^book:"))
     app.add_handler(CallbackQueryHandler(watch_callback, pattern="^watch:"))
     app.add_handler(CallbackQueryHandler(watch_cancel_callback, pattern="^wcancel:"))

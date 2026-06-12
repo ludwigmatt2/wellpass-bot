@@ -27,21 +27,23 @@ async def send_weekly_schedule(app) -> None:
 
             token = await auth.get_valid_token(user, db)
             now = datetime.now(timezone.utc)
-            to_dt = now + timedelta(days=7)
+            # Send tomorrow's schedule (most actionable on Sunday evening)
+            tomorrow = (now + timedelta(days=1)).date()
+            from_dt = datetime(tomorrow.year, tomorrow.month, tomorrow.day, 0, 0, 0, tzinfo=timezone.utc)
+            to_dt = datetime(tomorrow.year, tomorrow.month, tomorrow.day, 23, 59, 59, tzinfo=timezone.utc)
 
             for studio in studios:
                 try:
-                    sessions = await api.get_schedule(studio["gym_id"], token, now, to_dt)
+                    sessions = await api.get_schedule(studio["gym_id"], token, from_dt, to_dt)
                     filters_list = await db.get_class_filters(user["id"], studio["gym_id"])
-                    text = f"📅 *Neue Woche, neue Klassen!*\n\n" + format_schedule(sessions, studio["gym_name"], filters_list)
-
                     if filters_list:
-                        from_filters = {f["class_name"].lower() for f in filters_list}
-                        filtered_sessions = [s for s in sessions if s["name"].lower() in from_filters]
-                    else:
-                        filtered_sessions = sessions
+                        filter_names = {f["class_name"].lower() for f in filters_list}
+                        sessions = [s for s in sessions if s["name"].lower() in filter_names]
 
-                    keyboard = schedule_keyboard(filtered_sessions)
+                    text = "📅 *Neue Woche, neue Klassen!*\n\n" + format_schedule(
+                        sessions, studio["gym_name"], filters_list, tomorrow
+                    )
+                    keyboard = schedule_keyboard(sessions, studio["gym_id"], tomorrow)
                     await bot.send_message(
                         user["telegram_id"],
                         text,

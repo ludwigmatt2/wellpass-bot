@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date, timedelta
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 
@@ -6,25 +6,34 @@ def _dt(iso: str) -> datetime:
     return datetime.fromisoformat(iso.replace("Z", "+00:00"))
 
 
-def schedule_keyboard(sessions: list) -> InlineKeyboardMarkup:
+def schedule_keyboard(sessions: list, gym_id: str, target_date: date) -> InlineKeyboardMarkup:
     rows = []
     now = datetime.now(timezone.utc)
+
+    # Navigation row
+    prev_date = (target_date - timedelta(days=1)).strftime("%Y-%m-%d")
+    next_date = (target_date + timedelta(days=1)).strftime("%Y-%m-%d")
+    today = datetime.now(timezone.utc).date()
+    nav_row = []
+    if target_date > today:
+        nav_row.append(InlineKeyboardButton("← Zurück", callback_data=f"sched_nav:{gym_id}:{prev_date}"))
+    nav_row.append(InlineKeyboardButton("Vorwärts →", callback_data=f"sched_nav:{gym_id}:{next_date}"))
+    rows.append(nav_row)
+
     for s in sessions:
         booking_end = _dt(s["bookingWindowEnd"])
         free = s["capacity"] - s["booked"]
         name = s["name"]
         start = _dt(s["startDateTime"])
-        time_str = start.strftime("%a %H:%M")
-        emoji = "🔴" if free == 0 else ("🟡" if free <= 3 else "🟢")
-        label = f"{emoji} {name} {time_str} ({s['booked']}/{s['capacity']})"
+        time_str = start.strftime("%H:%M")
         if free > 0 and booking_end > now:
             rows.append([
-                InlineKeyboardButton(f"✅ {name} {time_str}", callback_data=f"book:{s['id']}"),
+                InlineKeyboardButton(f"✅ {time_str} {name}", callback_data=f"book:{s['id']}"),
                 InlineKeyboardButton("👁", callback_data=f"watch:{s['id']}"),
             ])
         else:
             rows.append([
-                InlineKeyboardButton(f"👁 {name} {time_str}", callback_data=f"watch:{s['id']}"),
+                InlineKeyboardButton(f"👁 {time_str} {name}", callback_data=f"watch:{s['id']}"),
             ])
     return InlineKeyboardMarkup(rows)
 

@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
 from collections import defaultdict
 
 
@@ -6,51 +6,36 @@ def _dt(iso: str) -> datetime:
     return datetime.fromisoformat(iso.replace("Z", "+00:00"))
 
 
-def _week_number(dt: datetime) -> int:
-    return dt.isocalendar()[1]
+_DAY_NAMES = {0: "Mo", 1: "Di", 2: "Mi", 3: "Do", 4: "Fr", 5: "Sa", 6: "So"}
 
 
-def format_schedule(sessions: list, gym_name: str, active_filters: list) -> str:
-    if not sessions:
-        return f"📅 Keine Klassen gefunden für {gym_name}."
-
+def format_schedule(sessions: list, gym_name: str, active_filters: list, target_date: date | None = None) -> str:
     filter_names = {f["class_name"].lower() for f in active_filters}
     if filter_names:
         sessions = [s for s in sessions if s["name"].lower() in filter_names]
 
     if not sessions:
-        return f"📅 Keine Klassen für deine Filter gefunden.\nFilter aktiv: {', '.join(f['class_name'] for f in active_filters)}"
+        hint = f"\n_Filter: {', '.join(f['class_name'] for f in active_filters)}_" if filter_names else ""
+        return f"📅 *{gym_name}*{hint}\n\nKeine Klassen für diesen Tag."
 
     sessions = sorted(sessions, key=lambda s: s["startDateTime"])
-    by_day: dict[str, list] = defaultdict(list)
-    for s in sessions:
-        day_key = s["startDateTime"][:10]
-        by_day[day_key].append(s)
+    dt_ref = _dt(sessions[0]["startDateTime"])
+    day_label = f"{_DAY_NAMES[dt_ref.weekday()]} {dt_ref.strftime('%d.%m.%Y')}"
 
-    now = datetime.now(timezone.utc)
-    week = _week_number(now)
-    lines = [f"📅 *Wochenplan KW {week} — {gym_name}*"]
+    lines = [f"📅 *{gym_name}*", f"*{day_label}*"]
     if filter_names:
         lines.append(f"_Filter: {', '.join(f['class_name'] for f in active_filters)}_")
     lines.append("")
 
-    day_names = {0: "Mo", 1: "Di", 2: "Mi", 3: "Do", 4: "Fr", 5: "Sa", 6: "So"}
-    for day_key, day_sessions in sorted(by_day.items()):
-        dt = _dt(day_sessions[0]["startDateTime"])
-        day_label = f"{day_names[dt.weekday()]} {dt.strftime('%d.%m')}"
-        lines.append(f"━━━ *{day_label}* ━━━")
-        for s in day_sessions:
-            start = _dt(s["startDateTime"])
-            free = s["capacity"] - s["booked"]
-            emoji = "🔴" if free == 0 else ("🟡" if free <= 3 else "🟢")
-            instructor = s.get("instructor", {})
-            trainer = instructor.get("fullName", "—") if instructor else "—"
-            lines.append(
-                f"{emoji} {s['name']:<18} {start.strftime('%H:%M')}  {trainer:<12} {s['booked']}/{s['capacity']}"
-            )
-        lines.append("")
+    for s in sessions:
+        start = _dt(s["startDateTime"])
+        free = s["capacity"] - s["booked"]
+        emoji = "🔴" if free == 0 else ("🟡" if free <= 3 else "🟢")
+        instructor = s.get("instructor", {})
+        trainer = instructor.get("fullName", "—") if instructor else "—"
+        lines.append(f"{emoji} `{start.strftime('%H:%M')}`  {s['name']:<18} {trainer:<12} {s['booked']}/{s['capacity']}")
 
-    return "\n".join(lines).rstrip()
+    return "\n".join(lines)
 
 
 def format_watches(watches: list) -> str:
