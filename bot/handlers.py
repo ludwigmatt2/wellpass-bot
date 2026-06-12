@@ -630,6 +630,7 @@ def register_handlers(app: Application) -> None:
         fallbacks=[CommandHandler("cancel", cancel_setup)],
         name="studio_search",
         persistent=False,
+        per_message=False,
     )
 
     filter_add_conv = ConversationHandler(
@@ -640,6 +641,7 @@ def register_handlers(app: Application) -> None:
         fallbacks=[CommandHandler("cancel", cancel_setup)],
         name="filter_add",
         persistent=False,
+        per_message=False,
     )
 
     app.add_handler(setup_conv)
