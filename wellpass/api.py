@@ -103,15 +103,17 @@ async def search_gyms(query: str, token: str, lat: float = 48.1351, lng: float =
         resp = await client.get(
             f"{MWA_BASE}/gym-finder/v1/gyms/overview",
             params={
-                "searchFilter": query,
-                "limit": 50,
+                "searchFilter": "wellpass",
+                "limit": 1000,
                 "latLong": f"{lat};{lng}",
-                "radius": 10000,
+                "radius": 30000,
             },
             headers=_mwa_headers(token),
         )
         resp.raise_for_status()
         data = resp.json()
-        if isinstance(data, dict):
-            return data.get("gyms", [])
-        return data
+        gyms = data.get("gyms", data) if isinstance(data, dict) else data
+        if query:
+            q = query.lower()
+            gyms = [g for g in gyms if q in g.get("name", "").lower()]
+        return gyms
