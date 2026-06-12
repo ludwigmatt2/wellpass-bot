@@ -175,16 +175,35 @@ async def studios_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     user = await _get_user_or_prompt(update, context)
     if not user:
         return
-    studios = await db.get_user_studios(user["id"])
-    if studios:
-        text = f"🏋️ *Deine Studios ({len(studios)}):*"
-    else:
-        text = "Du hast noch keine Studios hinzugefügt."
-    await update.message.reply_text(
-        text,
-        reply_markup=studios_keyboard(studios),
-        parse_mode=ParseMode.MARKDOWN,
-    )
+
+    msg = await update.message.reply_text("⏳ Lade Studios...")
+    try:
+        token = await auth.get_valid_token(user, db)
+        favs = await api.get_user_favourites(token)
+
+        # Sync favourites into user_studios
+        existing = await db.get_user_studios(user["id"])
+        existing_ids = {s["gym_id"] for s in existing}
+        for fav in favs:
+            if fav["serverGymsId"] not in existing_ids:
+                await db.add_user_studio(user["id"], fav["serverGymsId"], fav["name"], fav["slug"])
+
+        studios = await db.get_user_studios(user["id"])
+        if not studios:
+            await msg.edit_text(
+                "Du hast keine Wellpass-Favoriten.\n"
+                "Füge Studios in der Wellpass App zu deinen Favoriten hinzu und versuche es erneut."
+            )
+            return
+
+        await msg.edit_text(
+            f"📍 *Deine Studios ({len(studios)}):*\n_Tippe auf ein Studio für den Stundenplan._",
+            reply_markup=studios_keyboard(studios),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+    except Exception as e:
+        logger.error(f"Studios command error: {e}")
+        await msg.edit_text("Fehler beim Laden der Studios. Versuche es erneut.")
 
 
 async def studio_remove_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -301,7 +320,6 @@ async def schedule_studio_callback(update: Update, context: ContextTypes.DEFAULT
         return
 
     await query.message.delete()
-    studios = await db.get_user_studios(user["id"])
     await _send_schedule(query.message.chat, user, studio, context.bot, studios=studios)
 
 
