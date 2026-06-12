@@ -1,9 +1,16 @@
 from datetime import datetime, timezone, date
 from collections import defaultdict
+from zoneinfo import ZoneInfo
+
+_BERLIN = ZoneInfo("Europe/Berlin")
 
 
 def _dt(iso: str) -> datetime:
     return datetime.fromisoformat(iso.replace("Z", "+00:00"))
+
+
+def _local(iso: str) -> datetime:
+    return _dt(iso).astimezone(_BERLIN)
 
 
 _DAY_NAMES = {0: "Mo", 1: "Di", 2: "Mi", 3: "Do", 4: "Fr", 5: "Sa", 6: "So"}
@@ -28,7 +35,7 @@ def format_schedule(sessions: list, gym_name: str, active_filters: list, target_
     lines.append("")
 
     for s in sessions:
-        start = _dt(s["startDateTime"])
+        start = _local(s["startDateTime"])
         free = s["capacity"] - s["booked"]
         emoji = "🔴" if free == 0 else ("🟡" if free <= 3 else "🟢")
         instructor = s.get("instructor", {})
@@ -43,10 +50,8 @@ def format_watches(watches: list) -> str:
         return "Du beobachtest gerade keine Klassen."
     lines = ["👁 *Aktive Überwachungen:*\n"]
     for w in watches:
-        start = _dt(w["start_datetime"])
-        lines.append(
-            f"• {w['class_name']} — {start.strftime('%a %d.%m %H:%M')} ({w['gym_name']})"
-        )
+        start = _dt(w["start_datetime"]).astimezone(_BERLIN)
+        lines.append(f"• {w['class_name']} — {start.strftime('%a %d.%m %H:%M')} ({w['gym_name']})")
     return "\n".join(lines)
 
 
@@ -54,14 +59,9 @@ def format_bookings(bookings: list) -> str:
     if not bookings:
         return "Keine Buchungen in der Historie."
     lines = ["📋 *Letzte Buchungen:*\n"]
-    status_emoji = {
-        "BOOKED": "✅",
-        "CANCELLED": "❌",
-        "CHECKED_IN": "🏃",
-        "NO_SHOW": "💸",
-    }
+    status_emoji = {"BOOKED": "✅", "CANCELLED": "❌", "CHECKED_IN": "🏃", "NO_SHOW": "💸"}
     for b in bookings:
-        start = _dt(b["start_datetime"]) if b.get("start_datetime") else None
+        start = _dt(b["start_datetime"]).astimezone(_BERLIN) if b.get("start_datetime") else None
         time_str = start.strftime("%a %d.%m %H:%M") if start else "?"
         emoji = status_emoji.get(b.get("status", ""), "•")
         lines.append(f"{emoji} {b['class_name']} — {time_str} ({b.get('gym_name', '?')})")
@@ -69,10 +69,10 @@ def format_bookings(bookings: list) -> str:
 
 
 def format_booking_confirmation(booking: dict, session: dict, gym_name: str) -> str:
-    start = _dt(session["startDateTime"])
+    start = _local(session["startDateTime"])
     instructor = session.get("instructor", {})
     trainer = instructor.get("fullName", "—") if instructor else "—"
-    checkin_start = _dt(session.get("checkinStart", session["startDateTime"]))
+    checkin_start = _local(session.get("checkinStart", session["startDateTime"]))
     return (
         f"🎉 *Gebucht!*\n\n"
         f"*{session['name']}*\n"
@@ -84,7 +84,7 @@ def format_booking_confirmation(booking: dict, session: dict, gym_name: str) -> 
 
 
 def format_cancel_warning(booking: dict) -> str:
-    start = _dt(booking["start_datetime"])
+    start = _dt(booking["start_datetime"]).astimezone(_BERLIN)
     return (
         f"⚠️ *Stornierungsfenster läuft ab!*\n\n"
         f"{booking['class_name']} — {start.strftime('%a %d.%m.%Y %H:%M')}\n"

@@ -1,9 +1,16 @@
 from datetime import datetime, timezone, date, timedelta
+from zoneinfo import ZoneInfo
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+_BERLIN = ZoneInfo("Europe/Berlin")
 
 
 def _dt(iso: str) -> datetime:
     return datetime.fromisoformat(iso.replace("Z", "+00:00"))
+
+
+def _local(iso: str) -> datetime:
+    return _dt(iso).astimezone(_BERLIN)
 
 
 def schedule_keyboard(sessions: list, gym_id: str, target_date: date) -> InlineKeyboardMarkup:
@@ -24,7 +31,7 @@ def schedule_keyboard(sessions: list, gym_id: str, target_date: date) -> InlineK
         booking_end = _dt(s["bookingWindowEnd"])
         free = s["capacity"] - s["booked"]
         name = s["name"]
-        start = _dt(s["startDateTime"])
+        start = _local(s["startDateTime"])
         time_str = start.strftime("%H:%M")
         if free > 0 and booking_end > now:
             rows.append([
@@ -67,7 +74,7 @@ def studio_results_keyboard(gyms: list) -> InlineKeyboardMarkup:
 def watches_keyboard(watches: list) -> InlineKeyboardMarkup:
     rows = []
     for w in watches:
-        start = _dt(w["start_datetime"])
+        start = _dt(w["start_datetime"]).astimezone(_BERLIN)
         label = f"{w['class_name']} {start.strftime('%a %d.%m %H:%M')}"
         rows.append([
             InlineKeyboardButton(label[:40], callback_data=f"noop:{w['id']}"),
@@ -84,7 +91,8 @@ def bookings_keyboard(bookings: list) -> InlineKeyboardMarkup:
             continue
         start = _dt(b["start_datetime"])
         diff_hours = (start - now).total_seconds() / 3600
-        label = f"{b['class_name']} {start.strftime('%a %d.%m %H:%M')}"
+        start_local = start.astimezone(_BERLIN)
+        label = f"{b['class_name']} {start_local.strftime('%a %d.%m %H:%M')}"
         row = [InlineKeyboardButton(label[:40], callback_data=f"noop:{b['id']}")]
         if diff_hours > 0:
             row.append(InlineKeyboardButton("❌ Stornieren", callback_data=f"bcancel:{b['booking_id']}:{b['id']}"))
