@@ -36,7 +36,6 @@ def schedule_keyboard(sessions: list, gym_id: str, target_date: date) -> InlineK
         if free > 0 and booking_end > now:
             rows.append([
                 InlineKeyboardButton(f"✅ {time_str} {name}", callback_data=f"book:{s['id']}"),
-                InlineKeyboardButton("👁", callback_data=f"watch:{s['id']}"),
             ])
         else:
             rows.append([
