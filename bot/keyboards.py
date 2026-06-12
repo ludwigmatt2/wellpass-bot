@@ -13,11 +13,25 @@ def _local(iso: str) -> datetime:
     return _dt(iso).astimezone(_BERLIN)
 
 
-def schedule_keyboard(sessions: list, gym_id: str, target_date: date) -> InlineKeyboardMarkup:
+def schedule_keyboard(sessions: list, gym_id: str, target_date: date, studios: list | None = None) -> InlineKeyboardMarkup:
     rows = []
     now = datetime.now(timezone.utc)
+    date_str = target_date.strftime("%Y-%m-%d")
 
-    # Navigation row
+    # Studio switcher row (only when user has multiple studios)
+    if studios and len(studios) > 1:
+        idx = next((i for i, s in enumerate(studios) if s["gym_id"] == gym_id), 0)
+        nav = []
+        if idx > 0:
+            prev_s = studios[idx - 1]
+            nav.append(InlineKeyboardButton(f"← {prev_s['gym_name'][:14]}", callback_data=f"sched_studio:{prev_s['gym_id']}:{date_str}"))
+        if idx < len(studios) - 1:
+            next_s = studios[idx + 1]
+            nav.append(InlineKeyboardButton(f"{next_s['gym_name'][:14]} →", callback_data=f"sched_studio:{next_s['gym_id']}:{date_str}"))
+        if nav:
+            rows.append(nav)
+
+    # Day navigation row
     prev_date = (target_date - timedelta(days=1)).strftime("%Y-%m-%d")
     next_date = (target_date + timedelta(days=1)).strftime("%Y-%m-%d")
     today = datetime.now(timezone.utc).date()
@@ -30,17 +44,18 @@ def schedule_keyboard(sessions: list, gym_id: str, target_date: date) -> InlineK
     for s in sessions:
         booking_end = _dt(s["bookingWindowEnd"])
         free = s["capacity"] - s["booked"]
-        name = s["name"]
         start = _local(s["startDateTime"])
         time_str = start.strftime("%H:%M")
+        name = s["name"]
+        instructor = s.get("instructor") or {}
+        trainer = instructor.get("fullName", "")
+        label = f"{time_str}  {name}"
+        if trainer:
+            label += f" · {trainer}"
         if free > 0 and booking_end > now:
-            rows.append([
-                InlineKeyboardButton(f"✅ {time_str} {name}", callback_data=f"book:{s['id']}"),
-            ])
+            rows.append([InlineKeyboardButton(f"✅ {label}", callback_data=f"book:{s['id']}")])
         else:
-            rows.append([
-                InlineKeyboardButton(f"👁 {time_str} {name}", callback_data=f"watch:{s['id']}"),
-            ])
+            rows.append([InlineKeyboardButton(f"👁 {label}", callback_data=f"watch:{s['id']}")])
     return InlineKeyboardMarkup(rows)
 
 

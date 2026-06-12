@@ -17,31 +17,16 @@ _DAY_NAMES = {0: "Mo", 1: "Di", 2: "Mi", 3: "Do", 4: "Fr", 5: "Sa", 6: "So"}
 
 
 def format_schedule(sessions: list, gym_name: str, active_filters: list, target_date: date | None = None) -> str:
-    filter_names = {f["class_name"].lower() for f in active_filters}
-    if filter_names:
-        sessions = [s for s in sessions if s["name"].lower() in filter_names]
-
-    if not sessions:
-        hint = f"\n_Filter: {', '.join(f['class_name'] for f in active_filters)}_" if filter_names else ""
-        return f"📅 *{gym_name}*{hint}\n\nKeine Klassen für diesen Tag."
-
-    sessions = sorted(sessions, key=lambda s: s["startDateTime"])
-    dt_ref = _dt(sessions[0]["startDateTime"])
-    day_label = f"{_DAY_NAMES[dt_ref.weekday()]} {dt_ref.strftime('%d.%m.%Y')}"
-
-    lines = [f"📅 *{gym_name}*", f"*{day_label}*"]
-    if filter_names:
+    lines = [f"🏋️ *{gym_name}*"]
+    if target_date:
+        d = datetime(target_date.year, target_date.month, target_date.day, tzinfo=_BERLIN)
+        lines.append(f"*{_DAY_NAMES[d.weekday()]} {target_date.strftime('%d.%m.%Y')}*")
+    if active_filters:
         lines.append(f"_Filter: {', '.join(f['class_name'] for f in active_filters)}_")
-    lines.append("")
-
-    for s in sessions:
-        start = _local(s["startDateTime"])
-        free = s["capacity"] - s["booked"]
-        emoji = "🔴" if free == 0 else ("🟡" if free <= 3 else "🟢")
-        instructor = s.get("instructor", {})
-        trainer = instructor.get("fullName", "—") if instructor else "—"
-        lines.append(f"{emoji} `{start.strftime('%H:%M')}`  {s['name']:<18} {trainer:<12} {s['booked']}/{s['capacity']}")
-
+    filter_names = {f["class_name"].lower() for f in active_filters}
+    visible = [s for s in sessions if s["name"].lower() in filter_names] if filter_names else sessions
+    if not visible:
+        lines.append("\nKeine Klassen für diesen Tag.")
     return "\n".join(lines)
 
 

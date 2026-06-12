@@ -301,22 +301,25 @@ async def schedule_studio_callback(update: Update, context: ContextTypes.DEFAULT
         return
 
     await query.message.delete()
-    await _send_schedule(query.message.chat, user, studio, context.bot)
+    studios = await db.get_user_studios(user["id"])
+    await _send_schedule(query.message.chat, user, studio, context.bot, studios=studios)
 
 
-async def _send_schedule(chat, user: dict, studio: dict, bot, target_date: date | None = None) -> None:
+async def _send_schedule(chat, user: dict, studio: dict, bot, target_date: date | None = None, studios: list | None = None) -> None:
     if target_date is None:
         target_date = datetime.now(timezone.utc).date()
     msg = await bot.send_message(chat.id, "⏳ Lade Stundenplan...")
     try:
-        text, keyboard = await _fetch_schedule(user, studio, target_date)
+        if studios is None:
+            studios = await db.get_user_studios(user["id"])
+        text, keyboard = await _fetch_schedule(user, studio, target_date, studios)
         await msg.edit_text(text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
         logger.error(f"Schedule fetch error: {e}")
         await msg.edit_text("Fehler beim Laden des Stundenplans. Versuche es erneut.")
 
 
-async def _fetch_schedule(user: dict, studio: dict, target_date: date):
+async def _fetch_schedule(user: dict, studio: dict, target_date: date, studios: list | None = None):
     token = await auth.get_valid_token(user, db)
     from_dt = datetime(target_date.year, target_date.month, target_date.day, 0, 0, 0, tzinfo=timezone.utc)
     to_dt = datetime(target_date.year, target_date.month, target_date.day, 23, 59, 59, tzinfo=timezone.utc)
@@ -326,7 +329,7 @@ async def _fetch_schedule(user: dict, studio: dict, target_date: date):
         filter_names = {f["class_name"].lower() for f in filters_list}
         sessions = [s for s in sessions if s["name"].lower() in filter_names]
     text = format_schedule(sessions, studio["gym_name"], filters_list, target_date)
-    keyboard = schedule_keyboard(sessions, studio["gym_id"], target_date)
+    keyboard = schedule_keyboard(sessions, studio["gym_id"], target_date, studios)
     return text, keyboard
 
 
@@ -345,10 +348,33 @@ async def schedule_nav_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return
     try:
         target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-        text, keyboard = await _fetch_schedule(user, studio, target_date)
+        text, keyboard = await _fetch_schedule(user, studio, target_date, studios)
         await query.edit_message_text(text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
         logger.error(f"Schedule nav error: {e}")
+        await query.answer("Fehler beim Laden.", show_alert=True)
+
+
+async def schedule_studio_nav_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles studio-switcher buttons within the schedule view (sched_studio:{gym_id}:{date})."""
+    query = update.callback_query
+    await query.answer()
+    user = await db.get_user_by_telegram_id(query.from_user.id)
+    if not user:
+        return
+    parts = query.data.split(":")
+    gym_id, date_str = parts[1], parts[2]
+    studios = await db.get_user_studios(user["id"])
+    studio = next((s for s in studios if s["gym_id"] == gym_id), None)
+    if not studio:
+        await query.answer("Studio nicht gefunden.", show_alert=True)
+        return
+    try:
+        target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        text, keyboard = await _fetch_schedule(user, studio, target_date, studios)
+        await query.edit_message_text(text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        logger.error(f"Schedule studio nav error: {e}")
         await query.answer("Fehler beim Laden.", show_alert=True)
 
 
@@ -704,6 +730,7 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("help", help_command))
 
     app.add_handler(CallbackQueryHandler(schedule_nav_callback, pattern="^sched_nav:"))
+    app.add_handler(CallbackQueryHandler(schedule_studio_nav_callback, pattern="^sched_studio:"))
     app.add_handler(CallbackQueryHandler(book_callback, pattern="^book:"))
     app.add_handler(CallbackQueryHandler(watch_callback, pattern="^watch:"))
     app.add_handler(CallbackQueryHandler(watch_cancel_callback, pattern="^wcancel:"))
