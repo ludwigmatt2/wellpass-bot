@@ -1,4 +1,3 @@
-import asyncio
 import logging
 import os
 
@@ -24,14 +23,10 @@ _scheduler = None
 
 
 async def post_init(app: Application) -> None:
-    logger.info("Bot initialized")
-
-
-async def post_start(app: Application) -> None:
     global _scheduler
     app.create_task(polling_loop(app))
     _scheduler = setup_scheduler(app)
-    logger.info("Polling loop and scheduler running")
+    logger.info("Polling loop and scheduler started")
 
 
 async def post_shutdown(app: Application) -> None:
@@ -47,7 +42,6 @@ def main() -> None:
         Application.builder()
         .token(token)
         .post_init(post_init)
-        .post_start(post_start)
         .post_shutdown(post_shutdown)
         .build()
     )
