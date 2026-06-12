@@ -400,9 +400,9 @@ async def book_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def watch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    await query.answer()
     user = await db.get_user_by_telegram_id(query.from_user.id)
     if not user:
+        await query.answer()
         return
 
     session_id = query.data.split(":", 1)[1]
@@ -415,7 +415,7 @@ async def watch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         session = await api.get_session(session_id, token)
         booking_end = _dt(session["bookingWindowEnd"])
         if booking_end <= datetime.now(timezone.utc):
-            await query.answer("Das Buchungsfenster für diese Klasse ist abgelaufen.", show_alert=True)
+            await query.answer("Buchungsfenster bereits abgelaufen.", show_alert=True)
             return
 
         gym = session.get("gym", {})
@@ -435,10 +435,14 @@ async def watch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             start_datetime=session["startDateTime"],
         )
 
-        start = _dt(session["startDateTime"])
-        await query.answer(
-            f"👁 Beobachte {session['name']} am {start.strftime('%a %d.%m %H:%M')}",
-            show_alert=True,
+        from zoneinfo import ZoneInfo
+        start = _dt(session["startDateTime"]).astimezone(ZoneInfo("Europe/Berlin"))
+        await query.answer("👁 Auf Watchliste gesetzt!")
+        await query.message.reply_text(
+            f"👁 *Watchliste aktualisiert*\n\n"
+            f"Ich beobachte *{session['name']}* am {start.strftime('%a %d.%m. um %H:%M')} Uhr.\n"
+            f"Du wirst sofort benachrichtigt sobald ein Platz frei wird.",
+            parse_mode=ParseMode.MARKDOWN,
         )
     except Exception as e:
         logger.error(f"Watch error: {e}")
