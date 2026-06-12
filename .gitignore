@@ -1,0 +1,55 @@
+# Environment
+.env
+.env.*
+!.env.example
+
+# Claude / AI
+.claude/
+*.claude
+CLAUDE.md
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+dist/
+build/
+*.egg-info/
+.eggs/
+
+# Node
+node_modules/
+.npm/
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Secrets / credentials
+*.pem
+*.key
+*.p12
+secrets.json
+credentials.json
+service-account.json
+
+# Logs
+logs/
+*.log
+
+# Data / cache
+*.db
+*.sqlite
+*.sqlite3
+.cache/
