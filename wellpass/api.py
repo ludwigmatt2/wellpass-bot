@@ -95,10 +95,16 @@ async def get_gym_by_slug(slug: str, token: str) -> dict:
             headers=_mwa_headers(token),
         )
         resp.raise_for_status()
-        return resp.json()
+        raw = resp.json()
+        # Normalize: slug response uses "gymUUID" as the class-session gymId
+        return {
+            "serverGymsId": raw["gymUUID"],
+            "name": raw.get("alias") or raw.get("gymChainName", slug),
+            "slug": raw.get("slug", slug),
+        }
 
 
-async def search_gyms(query: str, token: str, lat: float = 48.1351, lng: float = 11.5820) -> list:
+async def _search_gyms_nearby(token: str, lat: float, lng: float) -> list:
     async with httpx.AsyncClient(timeout=20) as client:
         resp = await client.get(
             f"{MWA_BASE}/gym-finder/v1/gyms/overview",
@@ -112,8 +118,59 @@ async def search_gyms(query: str, token: str, lat: float = 48.1351, lng: float =
         )
         resp.raise_for_status()
         data = resp.json()
-        gyms = data.get("gyms", data) if isinstance(data, dict) else data
-        if query:
-            q = query.lower()
-            gyms = [g for g in gyms if q in g.get("name", "").lower()]
-        return gyms
+        return data if isinstance(data, list) else data.get("gyms", [])
+
+
+async def search_gyms(query: str, token: str, lat: float = 48.1351, lng: float = 11.5820) -> list:
+    """3-step search: direct slug → muenchen-{slug} → coordinate search + client filter."""
+    slug_attempt = query.strip().lower().replace(" ", "-")
+
+    # Step 1: direct slug lookup
+    try:
+        gym = await get_gym_by_slug(slug_attempt, token)
+        return [gym]
+    except Exception:
+        pass
+
+    # Step 2: muenchen-{slug}
+    try:
+        gym = await get_gym_by_slug(f"muenchen-{slug_attempt}", token)
+        return [gym]
+    except Exception:
+        pass
+
+    # Step 3: coordinate search, filter client-side by alias field "a"
+    raw_gyms = await _search_gyms_nearby(token, lat, lng)
+    q = query.lower()
+    matches = [g for g in raw_gyms if q in g.get("a", "").lower()]
+    return [
+        {
+            "serverGymsId": g["g"],
+            "name": g.get("a", g["g"]),
+            "slug": g.get("slug", ""),
+        }
+        for g in matches[:10]
+    ]
+
+
+async def get_user_favourites(token: str) -> list:
+    """Returns list of normalised gym dicts from user's Wellpass favourites."""
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(
+            f"{MWA_BASE}/gym-finder/v1/listings",
+            params={"filters": "favourites"},
+            headers=_mwa_headers(token),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        favs = data.get("favourites", [])
+        result = []
+        for fav in favs:
+            gym = fav.get("gym", {})
+            if gym.get("g"):
+                result.append({
+                    "serverGymsId": gym["g"],
+                    "name": gym.get("a", gym["g"]),
+                    "slug": gym.get("slug", ""),
+                })
+        return result

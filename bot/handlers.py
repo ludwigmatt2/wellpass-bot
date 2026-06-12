@@ -128,9 +128,27 @@ async def received_password(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 token_expires=token_data.expires_at_utc().isoformat(),
             )
 
+        # Auto-import Wellpass favourites as studios
+        user_record = await db.get_user_by_telegram_id(update.effective_user.id)
+        fav_text = ""
+        if user_record:
+            try:
+                favs = await api.get_user_favourites(token_data.accessToken)
+                for fav in favs:
+                    await db.add_user_studio(
+                        user_record["id"],
+                        fav["serverGymsId"],
+                        fav["name"],
+                        fav["slug"],
+                    )
+                if favs:
+                    fav_text = f"\n\n📍 {len(favs)} Wellpass-Favorit(en) automatisch importiert."
+            except Exception:
+                pass
+
         await msg.edit_text(
-            f"✅ Verbunden als *{display_name}*!\n\n"
-            f"Füge jetzt dein erstes Studio hinzu mit /studios",
+            f"✅ Verbunden als *{display_name}*!{fav_text}\n\n"
+            f"Deine Studios verwalten: /studios",
             parse_mode=ParseMode.MARKDOWN,
         )
     except Exception as e:

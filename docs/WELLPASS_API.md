@@ -275,27 +275,173 @@ Authorization: Bearer {accessToken}
 
 ## Gym Finder API
 
-### Get Gym by Slug
+> ⚠️ Die Gym Finder API hat **keine Freitext-Suche** nach Name. Suche läuft über Slug oder Koordinaten + client-seitiges Filtern.
+
+### Empfohlener Such-Flow
+
+```python
+async def find_gym(user_input: str, lat: float, lng: float) -> dict | None:
+    # 1. Versuche direkten Slug-Lookup
+    slug = user_input.lower().replace(" ", "-")  # "Basement" → "basement"
+    gym = await get_gym_by_slug(slug)
+    if gym: return gym
+
+    # 2. Versuche mit Stadt-Prefix (häufigstes Pattern)
+    slug_with_city = f"muenchen-{slug}"           # → "muenchen-basement"
+    gym = await get_gym_by_slug(slug_with_city)
+    if gym: return gym
+
+    # 3. Fallback: Umgebungssuche + client-seitig nach Name filtern
+    results = await search_gyms_nearby(lat, lng, radius=30000)
+    matches = [g for g in results if user_input.lower() in g["a"].lower()]
+    return matches[0] if matches else None
+```
+
+---
+
+### Option A — Lookup by Slug (schnellste Methode)
 
 ```
-GET https://mwa-api.int.api.egym.com/mwa/api/gym-finder/v1/gyms/{slug}
+GET {MWA_BASE}/gym-finder/v1/gyms/{slug}
 Authorization: Bearer {accessToken}
 ```
 
-Example: `/gym-finder/v1/gyms/muenchen-basement`
+Beispiele:
+```
+/gym-finder/v1/gyms/muenchen-basement
+/gym-finder/v1/gyms/crossfit-munich
+```
 
-**Response contains `serverGymsId`** — this is the `gymId` needed for class-session queries.
+**Response (200 OK) — vollständige Gym-Details:**
+```json
+{
+  "id": "f61ddbac-7085-4f55-abd3-1957dbed90ae",
+  "gymUUID": "158cc664-28d9-4e79-b8bd-883c9720cba7",
+  "gymId": 1032150,
+  "gymChainName": "Basement München",
+  "alias": "Basement - The Training Community München",
+  "slug": "muenchen-basement",
+  "website": "https://basement-gym.com",
+  "email": "team@basement-gym.com",
+  "address": {
+    "street": "Geibelstraße",
+    "streetNumber": "6",
+    "zipCode": "81679",
+    "city": "München",
+    "country": "DE",
+    "coordinates": [11.6025433, 48.1417855]
+  },
+  "qualitrainGym": true,
+  "studioType": "YOGA_STUDIO",
+  "timezone": "Europe/Berlin"
+}
+```
 
-### Search Gyms
+**Wichtig:** `gymUUID` aus dieser Response ist der `gymId` Parameter für `/class-session` Queries.
+
+---
+
+### Option B — Umgebungssuche (wenn Slug unbekannt)
 
 ```
-GET https://mwa-api.int.api.egym.com/mwa/api/gym-finder/v1/gyms/overview
-    ?searchFilter=wellpass
-    &limit=1000
-    &latLong={lat}%3B{lng}
-    &radius=30000
+GET {MWA_BASE}/gym-finder/v1/gyms/overview
+  ?searchFilter=wellpass
+  &limit=1000
+  &latLong={lat}%3B{lng}
+  &radius=30000
 Authorization: Bearer {accessToken}
 ```
+
+⚠️ Kein `?name=` oder `?q=` Parameter — **kein Freitext-Filter**.
+Ergebnisse client-seitig nach `a` (alias) filtern.
+
+**Response — Array mit abgekürzten Feldnamen:**
+```json
+[
+  {
+    "id": "f61ddbac-7085-4f55-abd3-1957dbed90ae",
+    "g": "158cc664-28d9-4e79-b8bd-883c9720cba7",
+    "egi": "1032150",
+    "a": "Basement - The Training Community München",
+    "slug": "muenchen-basement",
+    "lat": 48.1417855,
+    "lng": 11.6025433,
+    "d": 0.0,
+    "st": "YOGA_STUDIO",
+    "ac": [{"a": "YOGA"}, {"a": "FITNESS"}, {"a": "CROSS_TRAINING"}],
+    "lc": "de_DE",
+    "qtpone": true
+  }
+]
+```
+
+**Feldmapping (Kurzfelder → Bedeutung):**
+| Kurzfeld | Bedeutung | Wichtig? |
+|---|---|---|
+| `g` | `gymUUID` = `serverGymsId` | ✅ **Für class-session queries** |
+| `a` | `alias` = Anzeigename | ✅ Für client-seitigen Filter |
+| `slug` | URL-Slug | ✅ Für Slug-Lookup |
+| `id` | interne DB-ID | ❌ Nicht für API-Calls |
+| `egi` | egymLegacyId | ❌ |
+| `d` | Distanz in km | Optional |
+| `st` | Studio-Typ | Optional |
+| `ac` | Aktivitäten | Optional |
+| `lat`, `lng` | Koordinaten | Optional |
+
+**Beispiel client-seitiges Filtern:**
+```python
+results = await search_gyms_nearby(48.1417, 11.6025)
+matches = [g for g in results if "basement" in g["a"].lower()]
+# matches[0]["g"] → gymUUID für class-session queries
+```
+
+---
+
+### Option C — Favoriten des Users abrufen
+
+```
+GET {MWA_BASE}/gym-finder/v1/listings
+Authorization: Bearer {accessToken}
+
+GET {MWA_BASE}/gym-finder/v1/listings?filters=favourites
+Authorization: Bearer {accessToken}
+```
+
+**Response:**
+```json
+{
+  "favourites": [
+    {
+      "id": "ce3f78fc-...",
+      "gym": {
+        "g": "158cc664-28d9-4e79-b8bd-883c9720cba7",
+        "a": "Basement - The Training Community München",
+        "slug": "muenchen-basement"
+      }
+    }
+  ]
+}
+```
+
+Nützlich um beim Setup automatisch die Favoriten des Users zu laden.
+
+---
+
+### gymUUID vs id — Wichtige Unterscheidung
+
+```
+gym-finder Response:
+  "id"      → interne DB-ID         (NICHT für class-session verwenden)
+  "g"       → gymUUID = serverGymsId (FÜR class-session verwenden ✅)
+
+gym-finder/v1/gyms/{slug} Response:
+  "id"      → interne DB-ID         (NICHT für class-session verwenden)
+  "gymUUID" → serverGymsId          (FÜR class-session verwenden ✅)
+
+class-session Query:
+  ?gymId=158cc664-28d9-4e79-b8bd-883c9720cba7  ← immer der gymUUID / "g" Wert
+```
+
 
 ---
 
