@@ -29,6 +29,18 @@ _BOOK_RETRY_COOLDOWN_S = 30
 _token_fail_count: dict[str, int] = {}
 _TOKEN_FAIL_NOTIFY_THRESHOLD = 3
 
+# watch_id -> last (booked, capacity, waitlistBooked, status) seen. Used to emit
+# a change-only AVAIL log line so a test run shows whether `booked` ever drops or
+# the spot is absorbed by the waitlist — without spamming a line every 5s.
+_last_counts: dict[str, tuple] = {}
+
+# Timestamp (UTC) of the last fully-successful poll iteration. Exposed for /status.
+_last_poll_ok: datetime | None = None
+
+
+def last_successful_poll() -> "datetime | None":
+    return _last_poll_ok
+
 
 async def _send(bot: Bot, telegram_id: int, text: str, reply_markup=None) -> None:
     try:
@@ -61,6 +73,9 @@ async def _check_watches(bot: Bot) -> None:
     for wid in list(_book_failed_at):
         if wid not in active_ids:
             del _book_failed_at[wid]
+    for wid in list(_last_counts):
+        if wid not in active_ids:
+            del _last_counts[wid]
 
     by_user: dict[str, list] = {}
     for w in watches:
@@ -122,6 +137,18 @@ async def _check_watches(bot: Bot) -> None:
             start_local = start_dt.astimezone(_BERLIN)
             free = cap - booked
             label = f"{watch['class_name']} {start_local.strftime('%a %d.%m %H:%M')}"
+
+            # Change-only diagnostic: reveals whether `booked` ever drops or the
+            # freed spot is swallowed by the Wellpass waitlist (booked stays full).
+            wl = session.get("waitlistBooked")
+            sess_status = session.get("status")
+            counts = (booked, cap, wl, sess_status)
+            if _last_counts.get(wid) != counts:
+                _last_counts[wid] = counts
+                logger.info(
+                    f"AVAIL [{label}] free={free}/{cap} booked={booked} "
+                    f"waitlistBooked={wl} status={sess_status}"
+                )
 
             if booking_end <= now or start_dt <= now:
                 logger.info(f"Expiring watch [{label}] — booking window closed")
@@ -249,6 +276,7 @@ async def _check_cancel_warnings(bot: Bot) -> None:
 
 
 async def polling_loop(app) -> None:
+    global _last_poll_ok
     bot: Bot = app.bot
     logger.info("Polling loop started")
     iteration = 0
@@ -260,6 +288,7 @@ async def polling_loop(app) -> None:
             await _check_watches(bot)
             if iteration % 12 == 0:  # every 60s
                 await _check_cancel_warnings(bot)
+            _last_poll_ok = datetime.now(timezone.utc)
             consec_errors = 0
             backoff_until = 0.0
         except (httpx.HTTPStatusError, httpx.TransportError) as e:

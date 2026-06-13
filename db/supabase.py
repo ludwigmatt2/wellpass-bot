@@ -37,6 +37,7 @@ CREATE TABLE watches (
   class_name      TEXT NOT NULL,
   start_datetime  TIMESTAMPTZ NOT NULL,
   status          TEXT DEFAULT 'ACTIVE',
+  status_changed_at TIMESTAMPTZ DEFAULT now(),  -- auto-stamped on status change (see db/migration_status_changed_at.sql)
   created_at      TIMESTAMPTZ DEFAULT now()
 );
 

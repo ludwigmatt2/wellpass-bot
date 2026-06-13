@@ -76,6 +76,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             f"/schedule — Wochenplan\n"
             f"/studios — Studios verwalten\n"
             f"/watching — Aktive Überwachungen\n"
+            f"/status — Status & Poller-Check\n"
             f"/bookings — Buchungshistorie\n"
             f"/filter — Klassen-Filter\n"
             f"/stop — Alle Watches stoppen\n"
@@ -556,6 +557,56 @@ async def watch_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TY
     await query.edit_message_text(text, reply_markup=kb, parse_mode=ParseMode.MARKDOWN)
 
 
+# ── /status ───────────────────────────────────────────────────────────────────
+
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    from zoneinfo import ZoneInfo
+    from core import poller
+    user = await _get_user_or_prompt(update, context)
+    if not user:
+        return
+    berlin = ZoneInfo("Europe/Berlin")
+    now = datetime.now(timezone.utc)
+
+    watches = await db.get_watches_for_user(user["id"])
+
+    # Token validity is informational — it auto-refreshes via session/re-login.
+    tok = user.get("token_expires")
+    if isinstance(tok, str):
+        try:
+            tok = datetime.fromisoformat(tok.replace("Z", "+00:00"))
+        except ValueError:
+            tok = None
+    if tok is not None and tok.tzinfo is None:
+        tok = tok.replace(tzinfo=timezone.utc)
+    if tok is None:
+        auth_line = "🔑 Login: noch nie angemeldet — bitte /start"
+    elif tok > now:
+        auth_line = (f"🔑 Login-Token gültig bis {tok.astimezone(berlin).strftime('%H:%M')} "
+                     f"(erneuert sich automatisch)")
+    else:
+        auth_line = "🔑 Login-Token abgelaufen — erneuert sich beim nächsten Poll automatisch"
+
+    last_poll = poller.last_successful_poll()
+    if last_poll is None:
+        poll_line = "⏱ Poller: noch kein erfolgreicher Durchlauf seit Neustart"
+    else:
+        age = int((now - last_poll).total_seconds())
+        poll_line = f"⏱ Letzter erfolgreicher Poll: vor {age}s (Intervall 5s)"
+
+    if watches:
+        lines = "\n".join(
+            f"• {w['class_name']} — {_dt(w['start_datetime']).astimezone(berlin).strftime('%a %d.%m %H:%M')}"
+            for w in watches
+        )
+        watch_block = f"👁 *Aktive Überwachungen: {len(watches)}*\n{lines}"
+    else:
+        watch_block = "👁 *Aktive Überwachungen: 0* — der Bot beobachtet aktuell nichts."
+
+    text = f"📊 *Status*\n\n{watch_block}\n\n{auth_line}\n{poll_line}"
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
+
 # ── /bookings ─────────────────────────────────────────────────────────────────
 
 async def bookings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -769,6 +820,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/schedule — Wochenplan mit Buchungs-Buttons\n"
         "/studios — Studios hinzufügen & verwalten\n"
         "/watching — Aktive Überwachungen\n"
+        "/status — Status & Poller-Check\n"
         "/bookings — Buchungshistorie\n"
         "/filter — Klassen-Filter verwalten\n"
         "/stop — Alle Überwachungen stoppen\n"
@@ -835,6 +887,7 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("studios", studios_command))
     app.add_handler(CommandHandler("schedule", schedule_command))
     app.add_handler(CommandHandler("watching", watching_command))
+    app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("bookings", bookings_command))
     app.add_handler(CommandHandler("filter", filter_command))
     app.add_handler(CommandHandler("stop", stop_command))
