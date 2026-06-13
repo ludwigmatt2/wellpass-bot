@@ -175,11 +175,11 @@ async def polling_loop(app) -> None:
     while True:
         try:
             watch_count = await _check_watches(bot)
-            if iteration % 4 == 0:
+            if iteration % 12 == 0:  # every 60s
                 await _check_cancel_warnings(bot)
-            if iteration % 20 == 0:
+            if iteration % 60 == 0:  # every 5 min
                 logger.info(f"Poller alive — {watch_count} active watch(es)")
         except Exception as e:
             logger.error(f"Polling iteration error: {e}")
-        await asyncio.sleep(15)
+        await asyncio.sleep(5)
         iteration += 1
