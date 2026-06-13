@@ -103,7 +103,7 @@ def bookings_keyboard(bookings: list) -> InlineKeyboardMarkup:
         label = f"{b['class_name']} {start_local.strftime('%a %d.%m %H:%M')}"
         row = [InlineKeyboardButton(label[:40], callback_data=f"noop:{b['id']}")]
         if diff_hours > 0:
-            row.append(InlineKeyboardButton("❌ Stornieren", callback_data=f"bcancel:{b['booking_id']}:{b['id']}"))
+            row.append(InlineKeyboardButton("❌ Stornieren", callback_data=f"bcancel:{b['booking_id']}"))
         rows.append(row)
     return InlineKeyboardMarkup(rows) if rows else InlineKeyboardMarkup([])
 
@@ -133,7 +133,8 @@ def studio_picker_keyboard(studios: list, prefix: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
-def cancel_keyboard(booking_id_wellpass: str, booking_db_id: str) -> InlineKeyboardMarkup:
+def cancel_keyboard(booking_id_wellpass: str, booking_db_id: str = "") -> InlineKeyboardMarkup:
+    # callback_data limit is 64 bytes — use only the Wellpass booking ID (cancel only needs this)
     return InlineKeyboardMarkup([[
-        InlineKeyboardButton("❌ Stornieren", callback_data=f"bcancel:{booking_id_wellpass}:{booking_db_id}"),
+        InlineKeyboardButton("❌ Stornieren", callback_data=f"bcancel:{booking_id_wellpass}"),
     ]])
