@@ -63,7 +63,10 @@ def studios_keyboard(studios: list) -> InlineKeyboardMarkup:
     rows = []
     for studio in studios[:20]:
         name = studio["gym_name"][:35]
-        rows.append([InlineKeyboardButton(f"🏋️ {name}", callback_data=f"schedule_studio:{studio['gym_id']}")])
+        rows.append([
+            InlineKeyboardButton(f"🏋️ {name}", callback_data=f"schedule_studio:{studio['gym_id']}"),
+            InlineKeyboardButton("❌", callback_data=f"studio_rm:{studio['gym_id']}"),
+        ])
     return InlineKeyboardMarkup(rows)
 
 

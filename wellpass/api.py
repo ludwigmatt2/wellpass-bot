@@ -18,9 +18,14 @@ def _mwa_headers(token: str) -> dict:
 
 
 def is_available(session: dict) -> bool:
+    cap = session.get("capacity")
+    bk = session.get("booked")
+    end = session.get("bookingWindowEnd")
+    if cap is None or bk is None or not end:
+        return False
     now = datetime.now(timezone.utc)
-    booking_end = datetime.fromisoformat(session["bookingWindowEnd"].replace("Z", "+00:00"))
-    free_spots = session["capacity"] - session["booked"]
+    booking_end = datetime.fromisoformat(end.replace("Z", "+00:00"))
+    free_spots = cap - bk
     return free_spots > 0 and booking_end > now and session.get("status") == "ACTIVE"
 
 
@@ -62,13 +67,22 @@ async def book_class(session_id: str, token: str) -> dict:
         return resp.json()
 
 
-async def cancel_booking(booking_id: str, token: str) -> bool:
+async def cancel_booking(booking_id: str, token: str) -> tuple[bool, int]:
+    """Returns (success, status_code). Treats 200/202/204 as success.
+    Logs the response body on unexpected (non-success) status codes so genuine
+    auth/permission failures are not hidden behind a bare bool.
+    """
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.post(
             f"{MWA_BASE}/class-booking/v1/booking/{booking_id}/cancel",
             headers=_mwa_headers(token),
         )
-        return resp.status_code in (200, 204)
+        success = resp.status_code in (200, 202, 204)
+        if not success:
+            logger.error(
+                f"cancel_booking {booking_id} -> HTTP {resp.status_code}: {resp.text[:300]}"
+            )
+        return success, resp.status_code
 
 
 async def get_user_bookings(token: str, from_dt: datetime) -> list:
@@ -97,8 +111,11 @@ async def get_gym_by_slug(slug: str, token: str) -> dict:
         resp.raise_for_status()
         raw = resp.json()
         # Normalize: slug response uses "gymUUID" as the class-session gymId
+        gym_uuid = raw.get("gymUUID")
+        if not gym_uuid:
+            raise ValueError(f"Gym slug '{slug}' response missing gymUUID")
         return {
-            "serverGymsId": raw["gymUUID"],
+            "serverGymsId": gym_uuid,
             "name": raw.get("alias") or raw.get("gymChainName", slug),
             "slug": raw.get("slug", slug),
         }
@@ -125,19 +142,22 @@ async def search_gyms(query: str, token: str, lat: float = 48.1351, lng: float =
     """3-step search: direct slug → muenchen-{slug} → coordinate search + client filter."""
     slug_attempt = query.strip().lower().replace(" ", "-")
 
-    # Step 1: direct slug lookup
+    # Step 1: direct slug lookup. A genuine 404 means "no such slug" → fall
+    # through to the next step; auth/5xx/transport errors must propagate.
     try:
         gym = await get_gym_by_slug(slug_attempt, token)
         return [gym]
-    except Exception:
-        pass
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code != 404:
+            raise
 
     # Step 2: muenchen-{slug}
     try:
         gym = await get_gym_by_slug(f"muenchen-{slug_attempt}", token)
         return [gym]
-    except Exception:
-        pass
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code != 404:
+            raise
 
     # Step 3: coordinate search, filter client-side by alias field "a"
     raw_gyms = await _search_gyms_nearby(token, lat, lng)
@@ -145,11 +165,12 @@ async def search_gyms(query: str, token: str, lat: float = 48.1351, lng: float =
     matches = [g for g in raw_gyms if q in g.get("a", "").lower()]
     return [
         {
-            "serverGymsId": g["g"],
-            "name": g.get("a", g["g"]),
+            "serverGymsId": g.get("g"),
+            "name": g.get("a", g.get("g")),
             "slug": g.get("slug", ""),
         }
         for g in matches[:10]
+        if g.get("g")
     ]
 
 

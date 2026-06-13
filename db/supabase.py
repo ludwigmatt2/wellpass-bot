@@ -209,8 +209,14 @@ async def add_watch(
     return result.data[0]
 
 
-async def cancel_watch(watch_id: str) -> None:
-    await _run(lambda: _get().table("watches").update({"status": "CANCELLED"}).eq("id", watch_id).execute())
+async def cancel_watch(watch_id: str, user_id: str | None = None) -> int:
+    def _do():
+        q = _get().table("watches").update({"status": "CANCELLED"}).eq("id", watch_id)
+        if user_id is not None:
+            q = q.eq("user_id", user_id)
+        return q.execute()
+    result = await _run(_do)
+    return len(result.data or [])
 
 
 async def expire_watch(watch_id: str) -> None:
@@ -250,34 +256,64 @@ async def get_user_bookings_history(user_id: str, limit: int = 10) -> list:
     return result.data or []
 
 
-async def cancel_booking_record(booking_id_wellpass: str) -> None:
-    await _run(lambda: _get().table("bookings").update({"status": "CANCELLED"}).eq("booking_id", booking_id_wellpass).execute())
+async def get_booking_by_wellpass_id(booking_id_wellpass: str, user_id: str) -> dict | None:
+    result = await _run(lambda: _get().table("bookings")
+        .select("*")
+        .eq("booking_id", booking_id_wellpass)
+        .eq("user_id", user_id)
+        .execute())
+    return result.data[0] if result.data else None
+
+
+async def cancel_booking_record(booking_id_wellpass: str, user_id: str | None = None) -> int:
+    def _do():
+        q = _get().table("bookings").update({"status": "CANCELLED"}).eq("booking_id", booking_id_wellpass)
+        if user_id is not None:
+            q = q.eq("user_id", user_id)
+        return q.execute()
+    result = await _run(_do)
+    return len(result.data or [])
 
 
 async def has_booking_today(user_id: str, gym_id: str, date_str: str) -> bool:
-    """date_str: YYYY-MM-DD"""
+    """date_str: YYYY-MM-DD interpreted as a Europe/Berlin calendar day.
+
+    The day window is built in Europe/Berlin and converted to UTC so the
+    TIMESTAMPTZ comparison matches the Postgres-normalized start_datetime
+    regardless of UTC/Berlin offset boundaries.
+    """
+    from datetime import datetime, time, timezone
+    from zoneinfo import ZoneInfo
+    berlin = ZoneInfo("Europe/Berlin")
+    day = datetime.strptime(date_str, "%Y-%m-%d").date()
+    day_start_utc = datetime.combine(day, time(0, 0, 0), tzinfo=berlin).astimezone(timezone.utc)
+    day_end_utc = datetime.combine(day, time(23, 59, 59), tzinfo=berlin).astimezone(timezone.utc)
     result = await _run(lambda: _get().table("bookings")
         .select("id")
         .eq("user_id", user_id)
         .eq("gym_id", gym_id)
         .eq("status", "BOOKED")
-        .gte("start_datetime", f"{date_str}T00:00:00+00:00")
-        .lte("start_datetime", f"{date_str}T23:59:59+00:00")
+        .gte("start_datetime", day_start_utc.isoformat())
+        .lte("start_datetime", day_end_utc.isoformat())
         .execute())
     return bool(result.data)
 
 
 async def get_bookings_cancel_warning_due() -> list:
-    """Bookings where class starts in 12-13h and cancel_warned=false."""
+    """Bookings whose class starts within the next 13h and cancel_warned=false.
+
+    The window is one-sided (now < start <= now+13h) so cancel_warned is the
+    sole dedupe key — a booking can never be missed because its 12h mark fell
+    in a sampling gap, and is warned exactly once regardless of poll timing.
+    """
     from datetime import datetime, timezone, timedelta
     now = datetime.now(timezone.utc)
-    window_start = (now + timedelta(hours=12)).isoformat()
     window_end = (now + timedelta(hours=13)).isoformat()
     result = await _run(lambda: _get().table("bookings")
         .select("*, users(telegram_id)")
         .eq("status", "BOOKED")
         .eq("cancel_warned", False)
-        .gte("start_datetime", window_start)
+        .gt("start_datetime", now.isoformat())
         .lte("start_datetime", window_end)
         .execute())
     return result.data or []
@@ -303,8 +339,14 @@ async def add_class_filter(user_id: str, gym_id: str, class_name: str) -> dict:
     return result.data[0]
 
 
-async def remove_class_filter(filter_id: str) -> None:
-    await _run(lambda: _get().table("class_filters").delete().eq("id", filter_id).execute())
+async def remove_class_filter(filter_id: str, user_id: str | None = None) -> int:
+    def _do():
+        q = _get().table("class_filters").delete().eq("id", filter_id)
+        if user_id is not None:
+            q = q.eq("user_id", user_id)
+        return q.execute()
+    result = await _run(_do)
+    return len(result.data or [])
 
 
 async def clear_class_filters(user_id: str, gym_id: str) -> None:

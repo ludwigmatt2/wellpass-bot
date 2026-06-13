@@ -79,7 +79,7 @@ async def get_valid_token(user: dict, db) -> str:
 
     from core.crypto import decrypt
     password = decrypt(user["wellpass_pass"])
-    logger.info(f"Full re-login for user {user['id'][:8]} ({user.get('wellpass_email', '?')})")
+    logger.info(f"Full re-login for user {user['id'][:8]}")
     exerciser_id, jsessionid, _ = await login(user["wellpass_email"], password)
     token_data = await fetch_fls_token(exerciser_id, jsessionid)
     session_exp = (now + timedelta(hours=3)).isoformat()

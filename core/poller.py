@@ -3,6 +3,7 @@ import logging
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
+import httpx
 from telegram import Bot
 from telegram.constants import ParseMode
 
@@ -14,8 +15,19 @@ from bot.keyboards import cancel_keyboard
 logger = logging.getLogger(__name__)
 _BERLIN = ZoneInfo("Europe/Berlin")
 
-# session_id -> last known availability (True = had free spot last check)
+# watch_id -> last known availability (True = had free spot last check).
+# Keyed per-watch (not per-session) so concurrent watchers of the same
+# session get independent spot-open edge detection.
 _availability_state: dict[str, bool] = {}
+
+# watch_id -> last book-failure timestamp (UTC). Used to back off repeated
+# booking attempts so a persistent failure does not hammer the endpoint.
+_book_failed_at: dict[str, datetime] = {}
+_BOOK_RETRY_COOLDOWN_S = 30
+
+# user_id -> consecutive token-refresh failure count.
+_token_fail_count: dict[str, int] = {}
+_TOKEN_FAIL_NOTIFY_THRESHOLD = 3
 
 
 async def _send(bot: Bot, telegram_id: int, text: str, reply_markup=None) -> None:
@@ -39,13 +51,16 @@ async def _check_watches(bot: Bot) -> None:
     watches = await db.get_active_watches()
     if not watches:
         _availability_state.clear()
-        return 0
+        return
 
-    # Prune state for watches that no longer exist
-    active_ids = {w["session_id"] for w in watches}
-    for sid in list(_availability_state):
-        if sid not in active_ids:
-            del _availability_state[sid]
+    # Prune state for watches that no longer exist (keyed by watch id)
+    active_ids = {w["id"] for w in watches}
+    for wid in list(_availability_state):
+        if wid not in active_ids:
+            del _availability_state[wid]
+    for wid in list(_book_failed_at):
+        if wid not in active_ids:
+            del _book_failed_at[wid]
 
     by_user: dict[str, list] = {}
     for w in watches:
@@ -64,96 +79,156 @@ async def _check_watches(bot: Bot) -> None:
             token = await auth.get_valid_token(user, db)
             user_cache[user_id] = user
             token_cache[user_id] = token
+            _token_fail_count.pop(user_id, None)
         except Exception as e:
-            logger.error(f"Token refresh failed for user {user_id}: {e}")
+            # Escalate: a refresh failure means every watch for this user is dead
+            # until they re-auth. Notify the user once after repeated failures.
+            fails = _token_fail_count.get(user_id, 0) + 1
+            _token_fail_count[user_id] = fails
+            logger.error(f"Token refresh failed for user {user_id} (#{fails}): {e}")
+            if fails == _TOKEN_FAIL_NOTIFY_THRESHOLD and user:
+                await _send(bot, user["telegram_id"],
+                            "⚠️ *Anmeldung fehlgeschlagen* — deine Überwachungen sind "
+                            "pausiert. Bitte verbinde dich neu mit /start.")
 
     now = datetime.now(timezone.utc)
 
     for watch in watches:
-        user_id = watch["user_id"]
-        token = token_cache.get(user_id)
-        user = user_cache.get(user_id)
-        if not token or not user:
-            logger.warning(f"Skipping {len(by_user[user_id])} watch(es) for user {user_id[:8]}: no valid token")
-            continue
-
+        wid = watch["id"]
         try:
-            session = await api.get_session(watch["session_id"], token)
-        except Exception as e:
-            logger.warning(f"Session fetch failed for watch {watch['id'][:8]} [{watch['class_name']}]: {e}")
-            continue
+            user_id = watch["user_id"]
+            token = token_cache.get(user_id)
+            user = user_cache.get(user_id)
+            if not token or not user:
+                logger.warning(f"Skipping watch {wid[:8]} for user {user_id[:8]}: no valid token")
+                continue
 
-        booking_end = datetime.fromisoformat(session["bookingWindowEnd"].replace("Z", "+00:00"))
-        start_dt = datetime.fromisoformat(session["startDateTime"].replace("Z", "+00:00"))
-        start_local = start_dt.astimezone(_BERLIN)
-        free = session["capacity"] - session["booked"]
-        label = f"{watch['class_name']} {start_local.strftime('%a %d.%m %H:%M')}"
+            try:
+                session = await api.get_session(watch["session_id"], token)
+            except Exception as e:
+                logger.warning(f"Session fetch failed for watch {wid[:8]} [{watch['class_name']}]: {e}")
+                continue
 
-        if booking_end <= now or start_dt <= now:
-            logger.info(f"Expiring watch [{label}] — booking window closed")
-            _availability_state.pop(watch["session_id"], None)
-            await db.expire_watch(watch["id"])
-            continue
+            end_raw = session.get("bookingWindowEnd")
+            start_raw = session.get("startDateTime")
+            cap = session.get("capacity")
+            booked = session.get("booked")
+            if not end_raw or not start_raw or cap is None or booked is None:
+                logger.warning(f"Watch {wid[:8]} [{watch['class_name']}]: incomplete session payload — skipping")
+                continue
 
-        if session.get("status") != "ACTIVE":
-            logger.info(f"Expiring watch [{label}] — session status={session.get('status')}")
-            _availability_state.pop(watch["session_id"], None)
-            await db.expire_watch(watch["id"])
-            await _send(bot, user["telegram_id"],
-                        f"ℹ️ Die Klasse *{watch['class_name']}* ({start_local.strftime('%a %d.%m %H:%M')}) "
-                        f"wurde vom Studio abgesagt.")
-            continue
+            booking_end = datetime.fromisoformat(end_raw.replace("Z", "+00:00"))
+            start_dt = datetime.fromisoformat(start_raw.replace("Z", "+00:00"))
+            start_local = start_dt.astimezone(_BERLIN)
+            free = cap - booked
+            label = f"{watch['class_name']} {start_local.strftime('%a %d.%m %H:%M')}"
 
-        available = api.is_available(session)
-        was_available = _availability_state.get(watch["session_id"], False)
+            if booking_end <= now or start_dt <= now:
+                logger.info(f"Expiring watch [{label}] — booking window closed")
+                _availability_state.pop(wid, None)
+                await db.expire_watch(wid)
+                continue
 
-        if available != was_available:
-            _availability_state[watch["session_id"]] = available
-            if available:
-                logger.info(f"SPOT OPEN: [{label}] {free}/{session['capacity']} frei — attempting book")
+            if session.get("status") != "ACTIVE":
+                logger.info(f"Expiring watch [{label}] — session status={session.get('status')}")
+                _availability_state.pop(wid, None)
+                await db.expire_watch(wid)
                 await _send(bot, user["telegram_id"],
-                            f"🔔 *Platz gesehen!*\n_{label}_\n{free}/{session['capacity']} frei — versuche zu buchen…")
-            else:
-                logger.info(f"SPOT GONE: [{label}] wieder voll ({session['booked']}/{session['capacity']})")
+                            f"ℹ️ Die Klasse *{watch['class_name']}* ({start_local.strftime('%a %d.%m %H:%M')}) "
+                            f"wurde vom Studio abgesagt.")
+                continue
 
-        if not available:
-            continue
+            available = api.is_available(session)
+            was_available = _availability_state.get(wid, False)
 
-        date_str = session["startDateTime"][:10]
-        gym_id = session.get("gym", {}).get("serverGymsId", watch["gym_id"])
-        if await db.has_booking_today(user_id, gym_id, date_str):
-            logger.info(f"Daily limit reached for [{label}] — skipping")
-            await _send(bot, user["telegram_id"],
-                        f"⚠️ *Tägliches Limit erreicht*\nPlatz für _{label}_ gefunden, aber du hast heute bei diesem Studio bereits gebucht.")
-            continue
+            if available != was_available:
+                _availability_state[wid] = available
+                if available:
+                    logger.info(f"SPOT OPEN: [{label}] {free}/{cap} frei — attempting book")
+                    await _send(bot, user["telegram_id"],
+                                f"🔔 *Platz gesehen!*\n_{label}_\n{free}/{cap} frei — versuche zu buchen…")
+                else:
+                    logger.info(f"SPOT GONE: [{label}] wieder voll ({booked}/{cap})")
 
-        try:
-            booking = await api.book_class(watch["session_id"], token)
+            if not available:
+                continue
+
+            # Back off if we recently failed booking this watch — require a fresh
+            # availability edge plus a cooldown before re-POSTing.
+            last_fail = _book_failed_at.get(wid)
+            if last_fail and (now - last_fail).total_seconds() < _BOOK_RETRY_COOLDOWN_S:
+                continue
+
+            date_str = start_raw[:10]
+            gym_id = session.get("gym", {}).get("serverGymsId", watch["gym_id"])
+            if await db.has_booking_today(user_id, gym_id, date_str):
+                logger.info(f"Daily limit reached for [{label}] — skipping")
+                await _send(bot, user["telegram_id"],
+                            f"⚠️ *Tägliches Limit erreicht*\nPlatz für _{label}_ gefunden, aber du hast heute bei diesem Studio bereits gebucht.")
+                continue
+
+            # Block 1: the booking itself. On failure the watch stays ACTIVE; we
+            # drop the availability edge + set a cooldown so we don't hammer.
+            try:
+                booking = await api.book_class(watch["session_id"], token)
+            except Exception as e:
+                logger.exception(f"Auto-book FAILED [{label}]: {e}")
+                _book_failed_at[wid] = now
+                _availability_state.pop(wid, None)
+                await _send(bot, user["telegram_id"],
+                            f"❌ *Buchung fehlgeschlagen*\n_{label}_\nBitte versuche es erneut.")
+                continue
+
+            # Booking succeeded — commit terminal state immediately so we never
+            # re-book on the next tick, regardless of bookkeeping outcome.
+            _availability_state.pop(wid, None)
+            _book_failed_at.pop(wid, None)
+            await db.mark_watch_booked(wid)
             gym_name = session.get("gym", {}).get("name", watch["gym_name"])
-            await db.add_booking(
-                user_id=user_id,
-                watch_id=watch["id"],
-                booking_id=booking["id"],
-                gym_id=gym_id,
-                gym_name=gym_name,
-                class_name=session["name"],
-                start_datetime=session["startDateTime"],
-            )
-            await db.mark_watch_booked(watch["id"])
-            _availability_state.pop(watch["session_id"], None)
-            await _notify_booked(bot, user["telegram_id"], booking, session, gym_name)
-            logger.info(f"Auto-booked [{label}] for user {user_id[:8]}")
+
+            # The booking happened on Wellpass. If the response has no id we
+            # cannot reconcile it in our DB — alert loudly rather than crash.
+            bid = booking.get("id")
+            if not bid:
+                logger.error(
+                    f"Auto-booked [{label}] for user {user_id[:8]} but response had no id — "
+                    f"booking exists on Wellpass, DB untracked. Response: {booking}"
+                )
+
+            # Block 2: bookkeeping + notify. If this fails the user IS booked —
+            # never tell them otherwise; just log for reconciliation.
+            try:
+                await db.add_booking(
+                    user_id=user_id,
+                    watch_id=wid,
+                    booking_id=bid,
+                    gym_id=gym_id,
+                    gym_name=gym_name,
+                    class_name=session.get("name", watch["class_name"]),
+                    start_datetime=start_raw,
+                )
+                await _notify_booked(bot, user["telegram_id"], booking, session, gym_name)
+                logger.info(f"Auto-booked [{label}] for user {user_id[:8]}")
+            except Exception as e:
+                logger.error(
+                    f"Booked-but-bookkeeping-FAILED [{label}] booking={booking.get('id')} "
+                    f"user={user_id[:8]}: {e}"
+                )
         except Exception as e:
-            logger.error(f"Auto-book FAILED [{label}]: {e}")
-            await _send(bot, user["telegram_id"],
-                        f"❌ *Buchung fehlgeschlagen*\n_{label}_\nFehler: `{str(e)[:120]}`")
+            logger.exception(f"Unhandled error processing watch {wid[:8]}: {e}")
+            continue
 
 
 
 async def _check_cancel_warnings(bot: Bot) -> None:
     try:
         due = await db.get_bookings_cancel_warning_due()
-        for booking in due:
+    except Exception as e:
+        logger.error(f"Cancel warning check failed: {e}")
+        return
+
+    for booking in due:
+        try:
             telegram_id = None
             user_info = booking.get("users")
             if isinstance(user_info, dict):
@@ -161,23 +236,46 @@ async def _check_cancel_warnings(bot: Bot) -> None:
             elif isinstance(user_info, list) and user_info:
                 telegram_id = user_info[0].get("telegram_id")
 
+            # Only flag warned after a successful send — an absent recipient
+            # (missing user join) is left unflagged so it's retried next cycle.
             if telegram_id:
                 await _notify_cancel_warning(bot, telegram_id, booking)
-            await db.mark_cancel_warned(booking["id"])
-    except Exception as e:
-        logger.error(f"Cancel warning check failed: {e}")
+                await db.mark_cancel_warned(booking["id"])
+            else:
+                logger.warning(f"Cancel warning: no telegram_id for booking {booking.get('id')}")
+        except Exception as e:
+            logger.error(f"Cancel warning failed for booking {booking.get('id')}: {e}")
+            continue
 
 
 async def polling_loop(app) -> None:
     bot: Bot = app.bot
     logger.info("Polling loop started")
     iteration = 0
+    base_interval = 5
+    backoff_until = 0.0  # consecutive transport/HTTP-error backoff sleep (s)
+    consec_errors = 0
     while True:
         try:
             await _check_watches(bot)
             if iteration % 12 == 0:  # every 60s
                 await _check_cancel_warnings(bot)
+            consec_errors = 0
+            backoff_until = 0.0
+        except (httpx.HTTPStatusError, httpx.TransportError) as e:
+            consec_errors += 1
+            # Honour Retry-After on rate limits / outages, else exponential backoff.
+            retry_after = None
+            resp = getattr(e, "response", None)
+            if resp is not None:
+                ra = resp.headers.get("Retry-After")
+                if ra and ra.isdigit():
+                    retry_after = int(ra)
+            backoff_until = retry_after if retry_after is not None else min(
+                base_interval * (2 ** consec_errors), 60
+            )
+            logger.warning(f"Polling backing off {backoff_until:.0f}s after error #{consec_errors}: {e}")
         except Exception as e:
             logger.error(f"Polling iteration error: {e}")
-        await asyncio.sleep(5)
+        await asyncio.sleep(max(base_interval, backoff_until))
         iteration += 1

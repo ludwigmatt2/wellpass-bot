@@ -1,6 +1,9 @@
+import logging
 from pydantic import BaseModel, field_validator
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 class TokenResponse(BaseModel):
@@ -8,7 +11,16 @@ class TokenResponse(BaseModel):
     accessTokenExpiresAt: str
 
     def expires_at_utc(self) -> datetime:
-        dt = datetime.fromisoformat(self.accessTokenExpiresAt)
+        try:
+            dt = datetime.fromisoformat(self.accessTokenExpiresAt.replace("Z", "+00:00"))
+        except (ValueError, TypeError) as e:
+            # Degrade to a conservative short expiry so a parse glitch triggers
+            # more-frequent refresh instead of a hard crash.
+            logger.warning(
+                f"Could not parse accessTokenExpiresAt={self.accessTokenExpiresAt!r}: {e} "
+                "— falling back to ~50min expiry"
+            )
+            return datetime.now(timezone.utc) + timedelta(minutes=50)
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         return dt

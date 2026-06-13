@@ -57,6 +57,14 @@ def _dt(iso: str) -> datetime:
     return datetime.fromisoformat(iso.replace("Z", "+00:00"))
 
 
+def _mask_email(email: str) -> str:
+    """Mask an email for logs: first 2 chars of local part + domain."""
+    if not email or "@" not in email:
+        return "***"
+    local, _, domain = email.partition("@")
+    return f"{local[:2]}***@{domain}"
+
+
 # ── /start ─────────────────────────────────────────────────────────────────────
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -97,8 +105,15 @@ async def received_password(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     # Delete password message for security
     try:
         await context.bot.delete_message(update.effective_chat.id, update.message.message_id)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Could not delete password message for tg:{update.effective_user.id}: {e}")
+        try:
+            await update.effective_chat.send_message(
+                "⚠️ Ich konnte deine Passwort-Nachricht nicht löschen — "
+                "bitte lösche sie manuell aus dem Chat."
+            )
+        except Exception:
+            pass
 
     msg = await update.effective_chat.send_message("⏳ Verbinde mit Wellpass...")
 
@@ -144,17 +159,17 @@ async def received_password(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     )
                 if favs:
                     fav_text = f"\n\n📍 {len(favs)} Wellpass-Favorit(en) automatisch importiert."
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Favourites import failed for tg:{update.effective_user.id}: {e}")
 
-        logger.info(f"Setup complete: tg:{update.effective_user.id} ({display_name}, {email})")
+        logger.info(f"Setup complete: tg:{update.effective_user.id} ({_mask_email(email)})")
         await msg.edit_text(
             f"✅ Verbunden als *{display_name}*!{fav_text}\n\n"
             f"Deine Studios verwalten: /studios",
             parse_mode=ParseMode.MARKDOWN,
         )
     except Exception as e:
-        logger.error(f"Login failed for tg:{update.effective_user.id} ({email}): {e}")
+        logger.error(f"Login failed for tg:{update.effective_user.id} ({_mask_email(email)}): {e}")
         await msg.edit_text(
             "❌ Login fehlgeschlagen. Bitte prüfe E-Mail und Passwort.\n\n"
             "Versuche es nochmal mit /start"
@@ -165,8 +180,28 @@ async def received_password(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 async def cancel_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    context.user_data.clear()
+    context.user_data.pop("setup_email", None)
     await update.message.reply_text("Setup abgebrochen.")
+    return ConversationHandler.END
+
+
+async def cancel_generic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Neutral /cancel for conversations other than setup — only pops the
+    keys those conversations own, never the whole user_data."""
+    context.user_data.pop("gym_search", None)
+    context.user_data.pop("filter_gym_id", None)
+    if update.message:
+        await update.message.reply_text("Abgebrochen.")
+    return ConversationHandler.END
+
+
+async def conversation_invalid_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Catch-all for non-text input (sticker/photo/location) inside a
+    conversation state so the user is never stuck silently in-state."""
+    if update.effective_message:
+        await update.effective_message.reply_text(
+            "Bitte sende Text — oder /cancel zum Abbrechen."
+        )
     return ConversationHandler.END
 
 
@@ -354,7 +389,10 @@ async def _fetch_schedule(user: dict, studio: dict, target_date: date, studios: 
 
 
 async def _handle_schedule_nav(query, user: dict, log_prefix: str) -> None:
-    parts = query.data.split(":")
+    parts = query.data.split(":", 2)
+    if len(parts) < 3:
+        await query.answer("Ungültige Aktion.", show_alert=True)
+        return
     gym_id, date_str = parts[1], parts[2]
     studios = await db.get_user_studios(user["id"])
     studio = next((s for s in studios if s["gym_id"] == gym_id), None)
@@ -407,7 +445,8 @@ async def book_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             return
 
         gym_id = session.get("gym", {}).get("serverGymsId", "")
-        date_str = session["startDateTime"][:10]
+        from zoneinfo import ZoneInfo
+        date_str = _dt(session["startDateTime"]).astimezone(ZoneInfo("Europe/Berlin")).strftime("%Y-%m-%d")
         if await db.has_booking_today(user["id"], gym_id, date_str):
             await query.answer("Du hast heute bei diesem Studio bereits gebucht (Limit: 1/Tag).", show_alert=True)
             return
@@ -431,8 +470,8 @@ async def book_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await query.message.reply_text(text, reply_markup=kb, parse_mode=ParseMode.MARKDOWN)
         await query.answer("✅ Gebucht!")
     except Exception as e:
-        logger.error(f"Book error for tg:{query.from_user.id}: {e}")
-        await query.answer(f"Buchung fehlgeschlagen: {str(e)[:100]}", show_alert=True)
+        logger.exception(f"Book error for tg:{query.from_user.id}: {e}")
+        await query.answer("Buchung fehlgeschlagen, bitte erneut versuchen.", show_alert=True)
 
 
 async def watch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -483,8 +522,8 @@ async def watch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             parse_mode=ParseMode.MARKDOWN,
         )
     except Exception as e:
-        logger.error(f"Watch error for tg:{query.from_user.id}: {e}")
-        await query.answer(f"Fehler: {str(e)[:100]}", show_alert=True)
+        logger.exception(f"Watch error for tg:{query.from_user.id}: {e}")
+        await query.answer("Aktion fehlgeschlagen, bitte erneut versuchen.", show_alert=True)
 
 
 # ── /watching ──────────────────────────────────────────────────────────────────
@@ -502,11 +541,16 @@ async def watching_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 async def watch_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
-    watch_id = query.data.split(":", 1)[1]
-    await db.cancel_watch(watch_id)
-    logger.info(f"Watch {watch_id[:8]} cancelled via button by tg:{query.from_user.id}")
     user = await db.get_user_by_telegram_id(query.from_user.id)
-    watches = await db.get_watches_for_user(user["id"]) if user else []
+    if not user:
+        return
+    watch_id = query.data.split(":", 1)[1]
+    affected = await db.cancel_watch(watch_id, user["id"])
+    if not affected:
+        await query.answer("Überwachung nicht gefunden.", show_alert=True)
+        return
+    logger.info(f"Watch {watch_id[:8]} cancelled via button by tg:{query.from_user.id}")
+    watches = await db.get_watches_for_user(user["id"])
     text = format_watches(watches)
     kb = watches_keyboard(watches) if watches else None
     await query.edit_message_text(text, reply_markup=kb, parse_mode=ParseMode.MARKDOWN)
@@ -534,18 +578,28 @@ async def booking_cancel_callback(update: Update, context: ContextTypes.DEFAULT_
     parts = query.data.split(":")
     booking_id_wellpass = parts[1]
 
+    # Ownership check: only cancel bookings that belong to the caller.
+    booking_row = await db.get_booking_by_wellpass_id(booking_id_wellpass, user["id"])
+    if not booking_row:
+        await query.answer("Buchung nicht gefunden.", show_alert=True)
+        return
+
     try:
         token = await auth.get_valid_token(user, db)
-        success = await api.cancel_booking(booking_id_wellpass, token)
+        success, status = await api.cancel_booking(booking_id_wellpass, token)
         if success:
-            await db.cancel_booking_record(booking_id_wellpass)
+            await db.cancel_booking_record(booking_id_wellpass, user["id"])
             logger.info(f"Booking {booking_id_wellpass[:12]} cancelled by tg:{query.from_user.id}")
             await query.edit_message_text("✅ Buchung storniert.")
         else:
+            logger.warning(
+                f"Cancel returned non-success HTTP {status} for booking "
+                f"{booking_id_wellpass[:12]} tg:{query.from_user.id}"
+            )
             await query.answer("Stornierung fehlgeschlagen.", show_alert=True)
     except Exception as e:
-        logger.error(f"Cancel booking error for tg:{query.from_user.id}: {e}")
-        await query.answer(f"Fehler: {str(e)[:100]}", show_alert=True)
+        logger.exception(f"Cancel booking error for tg:{query.from_user.id}: {e}")
+        await query.answer("Aktion fehlgeschlagen, bitte erneut versuchen.", show_alert=True)
 
 
 # ── /filter ────────────────────────────────────────────────────────────────────
@@ -640,8 +694,14 @@ async def filter_add_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def filter_remove_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
+    user = await db.get_user_by_telegram_id(query.from_user.id)
+    if not user:
+        return
     filter_id = query.data.split(":", 1)[1]
-    await db.remove_class_filter(filter_id)
+    affected = await db.remove_class_filter(filter_id, user["id"])
+    if not affected:
+        await query.answer("Filter nicht gefunden.", show_alert=True)
+        return
     await query.answer("Filter entfernt.", show_alert=True)
     await query.edit_message_reply_markup(reply_markup=None)
 
@@ -732,7 +792,10 @@ def register_handlers(app: Application) -> None:
             SETUP_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_email)],
             SETUP_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_password)],
         },
-        fallbacks=[CommandHandler("cancel", cancel_setup)],
+        fallbacks=[
+            CommandHandler("cancel", cancel_setup),
+            MessageHandler(filters.ALL, conversation_invalid_input),
+        ],
         name="setup",
         persistent=False,
     )
@@ -742,7 +805,10 @@ def register_handlers(app: Application) -> None:
         states={
             STUDIO_SEARCH: [MessageHandler(filters.TEXT & ~filters.COMMAND, studio_search_handler)],
         },
-        fallbacks=[CommandHandler("cancel", cancel_setup)],
+        fallbacks=[
+            CommandHandler("cancel", cancel_generic),
+            MessageHandler(filters.ALL, conversation_invalid_input),
+        ],
         name="studio_search",
         persistent=False,
         per_message=False,
@@ -753,7 +819,10 @@ def register_handlers(app: Application) -> None:
         states={
             FILTER_ADD_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, filter_add_handler)],
         },
-        fallbacks=[CommandHandler("cancel", cancel_setup)],
+        fallbacks=[
+            CommandHandler("cancel", cancel_generic),
+            MessageHandler(filters.ALL, conversation_invalid_input),
+        ],
         name="filter_add",
         persistent=False,
         per_message=False,
