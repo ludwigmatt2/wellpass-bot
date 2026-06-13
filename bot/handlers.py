@@ -147,13 +147,14 @@ async def received_password(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             except Exception:
                 pass
 
+        logger.info(f"Setup complete: tg:{update.effective_user.id} ({display_name}, {email})")
         await msg.edit_text(
             f"✅ Verbunden als *{display_name}*!{fav_text}\n\n"
             f"Deine Studios verwalten: /studios",
             parse_mode=ParseMode.MARKDOWN,
         )
     except Exception as e:
-        logger.error(f"Login failed for {email}: {e}")
+        logger.error(f"Login failed for tg:{update.effective_user.id} ({email}): {e}")
         await msg.edit_text(
             "❌ Login fehlgeschlagen. Bitte prüfe E-Mail und Passwort.\n\n"
             "Versuche es nochmal mit /start"
@@ -424,12 +425,13 @@ async def book_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             start_datetime=session["startDateTime"],
         )
 
+        logger.info(f"Manual booking: [{session['name']}] tg:{query.from_user.id}")
         text = format_booking_confirmation(booking, session, gym_name)
         kb = cancel_keyboard(booking["id"])
         await query.message.reply_text(text, reply_markup=kb, parse_mode=ParseMode.MARKDOWN)
         await query.answer("✅ Gebucht!")
     except Exception as e:
-        logger.error(f"Book error: {e}")
+        logger.error(f"Book error for tg:{query.from_user.id}: {e}")
         await query.answer(f"Buchung fehlgeschlagen: {str(e)[:100]}", show_alert=True)
 
 
@@ -472,6 +474,7 @@ async def watch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         from zoneinfo import ZoneInfo
         start = _dt(session["startDateTime"]).astimezone(ZoneInfo("Europe/Berlin"))
+        logger.info(f"Watch added: [{session['name']} {start.strftime('%a %d.%m %H:%M')}] tg:{query.from_user.id}")
         await query.answer("👁 Auf Watchliste gesetzt!")
         await query.message.reply_text(
             f"👁 *Watchliste aktualisiert*\n\n"
@@ -480,7 +483,7 @@ async def watch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             parse_mode=ParseMode.MARKDOWN,
         )
     except Exception as e:
-        logger.error(f"Watch error: {e}")
+        logger.error(f"Watch error for tg:{query.from_user.id}: {e}")
         await query.answer(f"Fehler: {str(e)[:100]}", show_alert=True)
 
 
@@ -501,6 +504,7 @@ async def watch_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TY
     await query.answer()
     watch_id = query.data.split(":", 1)[1]
     await db.cancel_watch(watch_id)
+    logger.info(f"Watch {watch_id[:8]} cancelled via button by tg:{query.from_user.id}")
     user = await db.get_user_by_telegram_id(query.from_user.id)
     watches = await db.get_watches_for_user(user["id"]) if user else []
     text = format_watches(watches)
@@ -535,11 +539,12 @@ async def booking_cancel_callback(update: Update, context: ContextTypes.DEFAULT_
         success = await api.cancel_booking(booking_id_wellpass, token)
         if success:
             await db.cancel_booking_record(booking_id_wellpass)
+            logger.info(f"Booking {booking_id_wellpass[:12]} cancelled by tg:{query.from_user.id}")
             await query.edit_message_text("✅ Buchung storniert.")
         else:
             await query.answer("Stornierung fehlgeschlagen.", show_alert=True)
     except Exception as e:
-        logger.error(f"Cancel booking error: {e}")
+        logger.error(f"Cancel booking error for tg:{query.from_user.id}: {e}")
         await query.answer(f"Fehler: {str(e)[:100]}", show_alert=True)
 
 

@@ -74,6 +74,7 @@ async def _check_watches(bot: Bot) -> None:
         token = token_cache.get(user_id)
         user = user_cache.get(user_id)
         if not token or not user:
+            logger.warning(f"Skipping {len(by_user[user_id])} watch(es) for user {user_id[:8]}: no valid token")
             continue
 
         try:
