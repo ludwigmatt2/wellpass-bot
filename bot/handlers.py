@@ -1,7 +1,7 @@
 import logging
 from datetime import datetime, timezone, timedelta, date
 
-from telegram import Update
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
@@ -662,9 +662,37 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not watches:
         await update.message.reply_text("Keine aktiven Überwachungen.")
         return
+    from zoneinfo import ZoneInfo
+    berlin = ZoneInfo("Europe/Berlin")
+    lines = [f"⚠️ *{len(watches)} Überwachung(en) stoppen?*\n"]
+    for w in watches:
+        start = _dt(w["start_datetime"]).astimezone(berlin)
+        lines.append(f"• {w['class_name']} — {start.strftime('%a %d.%m %H:%M')} ({w['gym_name']})")
+    lines.append("\nDas lässt sich nicht rückgängig machen.")
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Ja, alle stoppen", callback_data="stop_confirm"),
+        InlineKeyboardButton("❌ Abbrechen", callback_data="stop_cancel"),
+    ]])
+    await update.message.reply_text("\n".join(lines), reply_markup=kb, parse_mode=ParseMode.MARKDOWN)
+
+
+async def stop_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    user = await db.get_user_by_telegram_id(query.from_user.id)
+    if not user:
+        return
+    watches = await db.get_watches_for_user(user["id"])
     for w in watches:
         await db.cancel_watch(w["id"])
-    await update.message.reply_text(f"✅ {len(watches)} Überwachung(en) gestoppt.")
+    logger.info(f"User {user['id'][:8]} manually stopped {len(watches)} watch(es) via /stop")
+    await query.edit_message_text(f"✅ {len(watches)} Überwachung(en) gestoppt.")
+
+
+async def stop_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("Abgebrochen — Überwachungen laufen weiter.")
 
 
 # ── /help ──────────────────────────────────────────────────────────────────────
@@ -751,4 +779,6 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CallbackQueryHandler(filter_studio_callback, pattern="^filter_studio:"))
     app.add_handler(CallbackQueryHandler(filter_remove_callback, pattern="^filter_rm:"))
     app.add_handler(CallbackQueryHandler(filter_clear_callback, pattern="^filter_clear:"))
+    app.add_handler(CallbackQueryHandler(stop_confirm_callback, pattern="^stop_confirm$"))
+    app.add_handler(CallbackQueryHandler(stop_cancel_callback, pattern="^stop_cancel$"))
     app.add_handler(CallbackQueryHandler(noop_callback, pattern="^noop:"))
