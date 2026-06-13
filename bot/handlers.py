@@ -184,11 +184,12 @@ async def studios_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         # Sync favourites into user_studios
         existing = await db.get_user_studios(user["id"])
         existing_ids = {s["gym_id"] for s in existing}
+        added = []
         for fav in favs:
             if fav["serverGymsId"] not in existing_ids:
-                await db.add_user_studio(user["id"], fav["serverGymsId"], fav["name"], fav["slug"])
+                added.append(await db.add_user_studio(user["id"], fav["serverGymsId"], fav["name"], fav["slug"]))
 
-        studios = await db.get_user_studios(user["id"])
+        studios = existing + added
         if not studios:
             await msg.edit_text(
                 "Du hast keine Wellpass-Favoriten.\n"
@@ -351,49 +352,39 @@ async def _fetch_schedule(user: dict, studio: dict, target_date: date, studios: 
     return text, keyboard
 
 
+async def _handle_schedule_nav(query, user: dict, log_prefix: str) -> None:
+    parts = query.data.split(":")
+    gym_id, date_str = parts[1], parts[2]
+    studios = await db.get_user_studios(user["id"])
+    studio = next((s for s in studios if s["gym_id"] == gym_id), None)
+    if not studio:
+        await query.answer("Studio nicht gefunden.", show_alert=True)
+        return
+    try:
+        target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        text, keyboard = await _fetch_schedule(user, studio, target_date, studios)
+        await query.edit_message_text(text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        logger.error(f"{log_prefix} error: {e}")
+        await query.answer("Fehler beim Laden.", show_alert=True)
+
+
 async def schedule_nav_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
     user = await db.get_user_by_telegram_id(query.from_user.id)
     if not user:
         return
-    parts = query.data.split(":")
-    gym_id, date_str = parts[1], parts[2]
-    studios = await db.get_user_studios(user["id"])
-    studio = next((s for s in studios if s["gym_id"] == gym_id), None)
-    if not studio:
-        await query.answer("Studio nicht gefunden.", show_alert=True)
-        return
-    try:
-        target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-        text, keyboard = await _fetch_schedule(user, studio, target_date, studios)
-        await query.edit_message_text(text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
-    except Exception as e:
-        logger.error(f"Schedule nav error: {e}")
-        await query.answer("Fehler beim Laden.", show_alert=True)
+    await _handle_schedule_nav(query, user, "Schedule nav")
 
 
 async def schedule_studio_nav_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles studio-switcher buttons within the schedule view (sched_studio:{gym_id}:{date})."""
     query = update.callback_query
     await query.answer()
     user = await db.get_user_by_telegram_id(query.from_user.id)
     if not user:
         return
-    parts = query.data.split(":")
-    gym_id, date_str = parts[1], parts[2]
-    studios = await db.get_user_studios(user["id"])
-    studio = next((s for s in studios if s["gym_id"] == gym_id), None)
-    if not studio:
-        await query.answer("Studio nicht gefunden.", show_alert=True)
-        return
-    try:
-        target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-        text, keyboard = await _fetch_schedule(user, studio, target_date, studios)
-        await query.edit_message_text(text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
-    except Exception as e:
-        logger.error(f"Schedule studio nav error: {e}")
-        await query.answer("Fehler beim Laden.", show_alert=True)
+    await _handle_schedule_nav(query, user, "Schedule studio nav")
 
 
 # ── Book & Watch callbacks ─────────────────────────────────────────────────────
@@ -434,7 +425,7 @@ async def book_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
 
         text = format_booking_confirmation(booking, session, gym_name)
-        kb = cancel_keyboard(booking["id"], booking["id"])
+        kb = cancel_keyboard(booking["id"])
         await query.message.reply_text(text, reply_markup=kb, parse_mode=ParseMode.MARKDOWN)
         await query.answer("✅ Gebucht!")
     except Exception as e:

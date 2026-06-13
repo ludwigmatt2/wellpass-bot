@@ -18,54 +18,54 @@ _BERLIN = ZoneInfo("Europe/Berlin")
 _availability_state: dict[str, bool] = {}
 
 
-async def _notify_booked(bot: Bot, telegram_id: int, booking: dict, session: dict, gym_name: str) -> None:
-    text = format_booking_confirmation(booking, session, gym_name)
-    kb = cancel_keyboard(booking["id"])
+async def _send(bot: Bot, telegram_id: int, text: str, reply_markup=None) -> None:
     try:
-        await bot.send_message(telegram_id, text, reply_markup=kb, parse_mode=ParseMode.MARKDOWN)
-    except Exception as e:
-        logger.error(f"Failed to notify {telegram_id}: {e}")
-
-
-async def _notify_cancel_warning(bot: Bot, telegram_id: int, booking: dict) -> None:
-    text = format_cancel_warning(booking)
-    kb = cancel_keyboard(booking["booking_id"])
-    try:
-        await bot.send_message(telegram_id, text, reply_markup=kb, parse_mode=ParseMode.MARKDOWN)
-    except Exception as e:
-        logger.error(f"Failed to send cancel warning to {telegram_id}: {e}")
-
-
-async def _send(bot: Bot, telegram_id: int, text: str) -> None:
-    try:
-        await bot.send_message(telegram_id, text, parse_mode=ParseMode.MARKDOWN)
+        await bot.send_message(telegram_id, text, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
         logger.error(f"Failed to send message to {telegram_id}: {e}")
 
 
-async def _check_watches(bot: Bot) -> None:
+async def _notify_booked(bot: Bot, telegram_id: int, booking: dict, session: dict, gym_name: str) -> None:
+    await _send(bot, telegram_id, format_booking_confirmation(booking, session, gym_name),
+                reply_markup=cancel_keyboard(booking["id"]))
+
+
+async def _notify_cancel_warning(bot: Bot, telegram_id: int, booking: dict) -> None:
+    await _send(bot, telegram_id, format_cancel_warning(booking),
+                reply_markup=cancel_keyboard(booking["booking_id"]))
+
+
+async def _check_watches(bot: Bot) -> int:
     watches = await db.get_active_watches()
     if not watches:
-        return
+        _availability_state.clear()
+        return 0
+
+    # Prune state for watches that no longer exist
+    active_ids = {w["session_id"] for w in watches}
+    for sid in list(_availability_state):
+        if sid not in active_ids:
+            del _availability_state[sid]
 
     by_user: dict[str, list] = {}
     for w in watches:
         by_user.setdefault(w["user_id"], []).append(w)
 
+    # Batch user DB reads in parallel
+    user_ids = list(by_user.keys())
+    users_list = await asyncio.gather(*[db.get_user_by_id(uid) for uid in user_ids])
+
     user_cache: dict[str, dict] = {}
     token_cache: dict[str, str] = {}
-
-    for user_id, user_watches in by_user.items():
+    for user_id, user in zip(user_ids, users_list):
+        if not user:
+            continue
         try:
-            user = await db.get_user_by_id(user_id)
-            if not user:
-                continue
             token = await auth.get_valid_token(user, db)
             user_cache[user_id] = user
             token_cache[user_id] = token
         except Exception as e:
             logger.error(f"Token refresh failed for user {user_id}: {e}")
-            continue
 
     now = datetime.now(timezone.utc)
 
@@ -88,7 +88,6 @@ async def _check_watches(bot: Bot) -> None:
         free = session["capacity"] - session["booked"]
         label = f"{watch['class_name']} {start_local.strftime('%a %d.%m %H:%M')}"
 
-        # Expire watches where booking window has passed
         if booking_end <= now or start_dt <= now:
             logger.info(f"Expiring watch [{label}] — booking window closed")
             _availability_state.pop(watch["session_id"], None)
@@ -99,44 +98,32 @@ async def _check_watches(bot: Bot) -> None:
             logger.info(f"Expiring watch [{label}] — session status={session.get('status')}")
             _availability_state.pop(watch["session_id"], None)
             await db.expire_watch(watch["id"])
-            try:
-                await bot.send_message(
-                    user["telegram_id"],
-                    f"ℹ️ Die Klasse *{watch['class_name']}* ({start_local.strftime('%a %d.%m %H:%M')}) "
-                    f"wurde vom Studio abgesagt.",
-                    parse_mode=ParseMode.MARKDOWN,
-                )
-            except Exception:
-                pass
+            await _send(bot, user["telegram_id"],
+                        f"ℹ️ Die Klasse *{watch['class_name']}* ({start_local.strftime('%a %d.%m %H:%M')}) "
+                        f"wurde vom Studio abgesagt.")
             continue
 
         available = api.is_available(session)
         was_available = _availability_state.get(watch["session_id"], False)
 
-        # Log + notify on state change (full ↔ available)
         if available != was_available:
             _availability_state[watch["session_id"]] = available
             if available:
                 logger.info(f"SPOT OPEN: [{label}] {free}/{session['capacity']} frei — attempting book")
-                await _send(
-                    bot, user["telegram_id"],
-                    f"🔔 *Platz gesehen!*\n_{label}_\n{free}/{session['capacity']} frei — versuche zu buchen…"
-                )
+                await _send(bot, user["telegram_id"],
+                            f"🔔 *Platz gesehen!*\n_{label}_\n{free}/{session['capacity']} frei — versuche zu buchen…")
             else:
                 logger.info(f"SPOT GONE: [{label}] wieder voll ({session['booked']}/{session['capacity']})")
 
         if not available:
             continue
 
-        # Check daily booking limit
         date_str = session["startDateTime"][:10]
         gym_id = session.get("gym", {}).get("serverGymsId", watch["gym_id"])
         if await db.has_booking_today(user_id, gym_id, date_str):
             logger.info(f"Daily limit reached for [{label}] — skipping")
-            await _send(
-                bot, user["telegram_id"],
-                f"⚠️ *Tägliches Limit erreicht*\nPlatz für _{label}_ gefunden, aber du hast heute bei diesem Studio bereits gebucht."
-            )
+            await _send(bot, user["telegram_id"],
+                        f"⚠️ *Tägliches Limit erreicht*\nPlatz für _{label}_ gefunden, aber du hast heute bei diesem Studio bereits gebucht.")
             continue
 
         try:
@@ -157,10 +144,10 @@ async def _check_watches(bot: Bot) -> None:
             logger.info(f"Auto-booked [{label}] for user {user_id[:8]}")
         except Exception as e:
             logger.error(f"Auto-book FAILED [{label}]: {e}")
-            await _send(
-                bot, user["telegram_id"],
-                f"❌ *Buchung fehlgeschlagen*\n_{label}_\nFehler: `{str(e)[:120]}`"
-            )
+            await _send(bot, user["telegram_id"],
+                        f"❌ *Buchung fehlgeschlagen*\n_{label}_\nFehler: `{str(e)[:120]}`")
+
+    return len(watches)
 
 
 async def _check_cancel_warnings(bot: Bot) -> None:
@@ -187,12 +174,11 @@ async def polling_loop(app) -> None:
     iteration = 0
     while True:
         try:
-            await _check_watches(bot)
+            watch_count = await _check_watches(bot)
             if iteration % 4 == 0:
                 await _check_cancel_warnings(bot)
-            if iteration % 20 == 0:  # heartbeat every 5 min
-                watches = await db.get_active_watches()
-                logger.info(f"Poller alive — {len(watches)} active watch(es)")
+            if iteration % 20 == 0:
+                logger.info(f"Poller alive — {watch_count} active watch(es)")
         except Exception as e:
             logger.error(f"Polling iteration error: {e}")
         await asyncio.sleep(15)

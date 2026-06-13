@@ -16,6 +16,7 @@ def _local(iso: str) -> datetime:
 def schedule_keyboard(sessions: list, gym_id: str, target_date: date, studios: list | None = None) -> InlineKeyboardMarkup:
     rows = []
     now = datetime.now(timezone.utc)
+    today = now.date()
     date_str = target_date.strftime("%Y-%m-%d")
 
     # Studio switcher row (only when user has multiple studios)
@@ -34,7 +35,6 @@ def schedule_keyboard(sessions: list, gym_id: str, target_date: date, studios: l
     # Day navigation row
     prev_date = (target_date - timedelta(days=1)).strftime("%Y-%m-%d")
     next_date = (target_date + timedelta(days=1)).strftime("%Y-%m-%d")
-    today = datetime.now(timezone.utc).date()
     nav_row = []
     if target_date > today:
         nav_row.append(InlineKeyboardButton("← Zurück", callback_data=f"sched_nav:{gym_id}:{prev_date}"))
@@ -133,8 +133,7 @@ def studio_picker_keyboard(studios: list, prefix: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
-def cancel_keyboard(booking_id_wellpass: str, booking_db_id: str = "") -> InlineKeyboardMarkup:
-    # callback_data limit is 64 bytes — use only the Wellpass booking ID (cancel only needs this)
+def cancel_keyboard(booking_id_wellpass: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[
         InlineKeyboardButton("❌ Stornieren", callback_data=f"bcancel:{booking_id_wellpass}"),
     ]])

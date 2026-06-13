@@ -1,5 +1,4 @@
-from datetime import datetime, timezone, date
-from collections import defaultdict
+from datetime import datetime, date
 from zoneinfo import ZoneInfo
 
 _BERLIN = ZoneInfo("Europe/Berlin")
@@ -19,8 +18,7 @@ _DAY_NAMES = {0: "Mo", 1: "Di", 2: "Mi", 3: "Do", 4: "Fr", 5: "Sa", 6: "So"}
 def format_schedule(sessions: list, gym_name: str, active_filters: list, target_date: date | None = None) -> str:
     lines = [f"🏋️ *{gym_name}*"]
     if target_date:
-        d = datetime(target_date.year, target_date.month, target_date.day, tzinfo=_BERLIN)
-        lines.append(f"*{_DAY_NAMES[d.weekday()]} {target_date.strftime('%d.%m.%Y')}*")
+        lines.append(f"*{_DAY_NAMES[target_date.weekday()]} {target_date.strftime('%d.%m.%Y')}*")
     if active_filters:
         lines.append(f"_Filter: {', '.join(f['class_name'] for f in active_filters)}_")
     filter_names = {f["class_name"].lower() for f in active_filters}
