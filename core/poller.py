@@ -35,7 +35,7 @@ async def _notify_cancel_warning(bot: Bot, telegram_id: int, booking: dict) -> N
                 reply_markup=cancel_keyboard(booking["booking_id"]))
 
 
-async def _check_watches(bot: Bot) -> int:
+async def _check_watches(bot: Bot) -> None:
     watches = await db.get_active_watches()
     if not watches:
         _availability_state.clear()
@@ -147,7 +147,6 @@ async def _check_watches(bot: Bot) -> int:
             await _send(bot, user["telegram_id"],
                         f"❌ *Buchung fehlgeschlagen*\n_{label}_\nFehler: `{str(e)[:120]}`")
 
-    return len(watches)
 
 
 async def _check_cancel_warnings(bot: Bot) -> None:
@@ -174,11 +173,9 @@ async def polling_loop(app) -> None:
     iteration = 0
     while True:
         try:
-            watch_count = await _check_watches(bot)
+            await _check_watches(bot)
             if iteration % 12 == 0:  # every 60s
                 await _check_cancel_warnings(bot)
-            if iteration % 60 == 0:  # every 5 min
-                logger.info(f"Poller alive — {watch_count} active watch(es)")
         except Exception as e:
             logger.error(f"Polling iteration error: {e}")
         await asyncio.sleep(5)
