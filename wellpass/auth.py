@@ -7,6 +7,11 @@ logger = logging.getLogger(__name__)
 
 NETPULSE_BASE = "https://qualitrain.netpulse.com"
 
+# How long before expiry we proactively refresh the FLS token. Must be SMALLER
+# than the token's real TTL, or the cache check never passes and we re-auth on
+# every poll. FLS tokens are short-lived, so keep this tight.
+_TOKEN_REFRESH_MARGIN = timedelta(seconds=60)
+
 _NP_HEADERS = {
     "x-np-user-agent": (
         "clientType=MOBILE_DEVICE; devicePlatform=IOS; "
@@ -58,7 +63,7 @@ async def get_valid_token(user: dict, db) -> str:
             token_expires = datetime.fromisoformat(token_expires.replace("Z", "+00:00"))
         if token_expires.tzinfo is None:
             token_expires = token_expires.replace(tzinfo=timezone.utc)
-        if token_expires - timedelta(minutes=5) > now:
+        if token_expires - _TOKEN_REFRESH_MARGIN > now:
             return user["access_token"]
 
     session_expires = user.get("session_expires")
@@ -74,7 +79,8 @@ async def get_valid_token(user: dict, db) -> str:
                 token_data.accessToken,
                 token_data.expires_at_utc().isoformat(),
             )
-            logger.info(f"FLS token refreshed for user {user['id'][:8]}")
+            ttl = int((token_data.expires_at_utc() - now).total_seconds())
+            logger.info(f"FLS token refreshed for user {user['id'][:8]} (ttl={ttl}s)")
             return token_data.accessToken
 
     from core.crypto import decrypt
@@ -91,4 +97,6 @@ async def get_valid_token(user: dict, db) -> str:
         token_data.accessToken,
         token_data.expires_at_utc().isoformat(),
     )
+    ttl = int((token_data.expires_at_utc() - now).total_seconds())
+    logger.info(f"Full re-login complete for user {user['id'][:8]} (token ttl={ttl}s)")
     return token_data.accessToken
